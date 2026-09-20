@@ -1,0 +1,310 @@
+import assert from 'node:assert/strict';
+import { describe, it } from 'node:test';
+import { BUILT_IN } from '../src/defaults.js';
+import { hostStub } from './helpers/host.js';
+import { getPreset, getSettings, initSettings, normaliseSettings, saveSettings, schemaProblem } from '../src/settings.js';
+
+const preset = (overrides = {}) => ({ description: '', sensors: [], rules: [], gap: 8, maxNudges: 1, ...overrides });
+
+const host = extensionSettings => hostStub({ extensionSettings });
+
+describe('normaliseSettings', () => {
+    it('replaces a value that is not a number with the built-in default', () => {
+        const settings = normaliseSettings({ timeoutMs: 'soon', instructionsCap: undefined });
+        assert.equal(settings.timeoutMs, 20000);
+        assert.equal(settings.instructionsCap, 24000);
+    });
+
+    it('pulls a number back inside its range and rounds it', () => {
+        const settings = normaliseSettings({
+            timeoutMs: 1e12,
+            instructionsCap: -1,
+            presets: { a: preset({ gap: -2, maxNudges: 99, sensors: [{ id: 'a', turns: 2.6, measureEvery: -4 }] }) },
+        });
+        assert.equal(settings.timeoutMs, 600000);
+        assert.equal(settings.instructionsCap, 0);
+        assert.deepEqual([settings.presets.a.gap, settings.presets.a.maxNudges], [0, 10]);
+        assert.deepEqual(
+            [settings.presets.a.sensors[0].turns, settings.presets.a.sensors[0].measureEvery],
+            [3, 1],
+        );
+    });
+
+    it('keeps a rule countable: whole numbers, at least one, and need no larger than window', () => {
+        const settings = normaliseSettings({
+            presets: { a: preset({ rules: [{ id: 'r', need: 0, window: 0 }, { id: 's', need: 9, window: 4, cooldown: -3 }] }) },
+        });
+        assert.deepEqual(settings.presets.a.rules.map(rule => [rule.need, rule.window]), [[1, 1], [4, 4]]);
+        assert.equal(settings.presets.a.rules[1].cooldown, 0);
+    });
+
+    it('gives every rule and sensor the new fields', () => {
+        const settings = normaliseSettings({
+            presets: { a: preset({ sensors: [{ id: 'a' }], rules: [{ id: 'r', action: 'jump' }] }) },
+        });
+        const [sensor] = settings.presets.a.sensors;
+        assert.equal(sensor.levels.length, 5);
+        assert.equal(sensor.watch, false);
+        assert.deepEqual([sensor.turns, sensor.includeContext, sensor.includeUser, sensor.measureEvery], [1, false, false, 1]);
+        assert.equal(settings.presets.a.rules[0].script, '');
+    });
+
+    it('turns off a rule whose action this Jeved does not know, and keeps its data', () => {
+        const settings = normaliseSettings({
+            presets: { a: preset({
+                sensors: [{ id: 'a' }],
+                rules: [{ id: 'r', enabled: true, action: 'teleport', directive: 'd', conditions: [{ sensor: 'a', op: 'below', value: 1 }] }],
+            }) },
+        });
+        const [rule] = settings.presets.a.rules;
+        assert.equal(rule.action, 'teleport');
+        assert.equal(rule.enabled, false);
+        assert.equal(rule.directive, 'd');
+        assert.deepEqual(rule.conditions, [{ sensor: 'a', op: 'below', value: 1 }]);
+    });
+
+    it('leaves a rule with no action at all on the default action', () => {
+        const settings = normaliseSettings({
+            presets: { a: preset({ sensors: [{ id: 'a' }], rules: [{ id: 'r', enabled: true }] }) },
+        });
+        assert.equal(settings.presets.a.rules[0].action, 'nudge');
+        assert.equal(settings.presets.a.rules[0].enabled, true);
+    });
+
+    it('makes every condition value a finite number', () => {
+        const settings = normaliseSettings({
+            presets: { a: preset({
+                sensors: [{ id: 'a' }],
+                rules: [{ id: 'r', need: 1, window: 1, conditions: [{ sensor: 'a', op: 'below', value: 'x' }], skipWhen: { sensor: 'a', op: 'above', value: '3' } }],
+            }) },
+        });
+        assert.equal(settings.presets.a.rules[0].conditions[0].value, 0);
+        assert.equal(settings.presets.a.rules[0].skipWhen.value, 3);
+    });
+
+    it('drops junk instead of throwing', () => {
+        const settings = normaliseSettings({
+            activePreset: 'gone',
+            presets: {
+                good: preset({ sensors: [null, 'x', { id: 'a' }], rules: [null, 7] }),
+                bad: 5,
+                worse: null,
+                broken: preset({ sensors: 'nope', rules: { id: 'r' } }),
+            },
+        });
+        assert.deepEqual(Object.keys(settings.presets), ['good', 'broken']);
+        assert.equal(settings.activePreset, 'good');
+        assert.equal(settings.presets.good.sensors.length, 1);
+        assert.deepEqual(settings.presets.good.rules, []);
+        assert.deepEqual(settings.presets.broken.sensors, []);
+    });
+
+    it('falls back to the built-in preset when none is left', () => {
+        const settings = normaliseSettings({ presets: { bad: 5 } });
+        assert.deepEqual(Object.keys(settings.presets), [BUILT_IN]);
+        assert.equal(settings.activePreset, BUILT_IN);
+        assert.equal(settings.presets[BUILT_IN].rules.filter(rule => rule.enabled).length, 3);
+    });
+});
+
+describe('reserved keys', () => {
+    it('drops a preset, a sensor and a rule that use a reserved key', () => {
+        const presets = JSON.parse('{"Good": null, "__proto__": null}');
+        presets.Good = preset({
+            sensors: [{ id: 'tone' }, { id: '__proto__' }],
+            rules: [{ id: 'flat' }, { id: 'constructor' }],
+        });
+        assert.deepEqual(Object.keys(presets), ['Good', '__proto__'], 'the import really made an own key');
+
+        const settings = normaliseSettings({ presets, activePreset: 'Good' });
+        assert.deepEqual(Object.keys(settings.presets), ['Good']);
+        assert.deepEqual(settings.presets.Good.sensors.map(item => item.id), ['tone']);
+        assert.deepEqual(settings.presets.Good.rules.map(item => item.id), ['flat']);
+    });
+
+    it('does not let a reserved preset name change the prototype', () => {
+        const settings = normaliseSettings({ presets: JSON.parse('{"__proto__": {}}') });
+        assert.equal(Object.getPrototypeOf(settings.presets), Object.prototype);
+        assert.ok(settings.presets[BUILT_IN]);
+    });
+
+    it('falls back to a real preset when the chosen name is only an inherited property', () => {
+        for (const name of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+            const settings = normaliseSettings({ presets: { Good: preset() }, activePreset: name });
+            assert.equal(settings.activePreset, 'Good', name);
+            assert.equal(getPreset(settings), settings.presets.Good, name);
+        }
+    });
+
+    it('keeps the chosen preset when it really is one of its own', () => {
+        const settings = normaliseSettings({ presets: { Good: preset(), Other: preset() }, activePreset: 'Other' });
+        assert.equal(settings.activePreset, 'Other');
+        assert.equal(getPreset(settings), settings.presets.Other);
+    });
+});
+
+describe('initSettings', () => {
+    it('leaves the settings of another extension where they are', () => {
+        const extensionSettings = { director: { enabled: true, apiKey: 'test-key' } };
+        const counts = host(extensionSettings);
+        const settings = initSettings();
+        assert.deepEqual(extensionSettings.director, { enabled: true, apiKey: 'test-key' });
+        assert.equal(settings.apiKey, '');
+        assert.ok(counts.saveCount > 0);
+        assert.equal(getSettings(), extensionSettings.jeved);
+    });
+
+    it('gives the plain defaults when nothing was stored', () => {
+        const extensionSettings = {};
+        host(extensionSettings);
+        const settings = initSettings();
+        assert.equal(settings.enabled, false);
+        assert.equal(settings.apiKey, '');
+        assert.equal(settings.instructionsCap, 24000);
+        assert.equal(settings.activePreset, BUILT_IN);
+        assert.equal(settings.presets[BUILT_IN].sensors.length, 7);
+    });
+
+    it('starts over when the stored value is not a record', () => {
+        for (const junk of ['junk', 42, true, [], null]) {
+            const extensionSettings = { jeved: junk };
+            host(extensionSettings);
+            const settings = initSettings();
+            assert.equal(settings.activePreset, BUILT_IN);
+            assert.equal(settings.presets[BUILT_IN].sensors.length, 7);
+        }
+    });
+
+    it('fills a field that a later version added', () => {
+        const extensionSettings = { jeved: { enabled: true, presets: { Mine: preset() }, activePreset: 'Mine' } };
+        host(extensionSettings);
+        const settings = initSettings();
+        assert.equal(settings.model, 'typesafe/jev-1.13');
+        assert.equal(settings.showBadge, true);
+        assert.equal(settings.activePreset, 'Mine');
+    });
+
+    it('upgrades a stored schema 1 file, keeps the cap the user chose and saves once', () => {
+        const extensionSettings = {
+            jeved: {
+                schema: 1,
+                instructionsCap: 48000,
+                activePreset: 'Mine',
+                presets: { Mine: {
+                    description: '',
+                    rules: [],
+                    storyWindow: 4,
+                    storyEvery: 1,
+                    sensors: [
+                        { id: 'tone', scope: 'story', question: 'Does `recent_story` fit `instructions`?', levels: ['a', 'b', 'c', 'd', 'e'] },
+                        { id: 'pace', scope: 'reply', question: 'How fast is `narrator_reply`?', levels: ['a', 'b', 'c', 'd', 'e'] },
+                    ],
+                } },
+            },
+        };
+        const counts = host(extensionSettings);
+        const settings = initSettings();
+        const [tone, pace] = settings.presets.Mine.sensors;
+        assert.equal(settings.schema, 2);
+        assert.equal(settings.instructionsCap, 48000);
+        assert.deepEqual([tone.turns, tone.includeContext, tone.includeUser, tone.measureEvery], [4, true, false, 1]);
+        assert.deepEqual([pace.turns, pace.includeContext, pace.includeUser, pace.measureEvery], [1, false, true, 1]);
+        assert.equal(tone.question, 'Does `latest_turns` fit `context`?');
+        assert.equal(settings.presets.Mine.contextGroups.persona, true);
+        assert.equal(settings.presets.Mine.storyWindow, undefined);
+        assert.equal(settings.presets.Mine.jeved, 2);
+        assert.equal(counts.saveCount, 1);
+
+        initSettings();
+        assert.equal(counts.saveCount, 1);
+    });
+
+    it('keeps the groups a stored schema 2 preset left out of its map switched on', () => {
+        const extensionSettings = {
+            jeved: {
+                schema: 2,
+                activePreset: 'Mine',
+                presets: { Mine: {
+                    description: '',
+                    rules: [],
+                    sensors: [{ id: 'tone', label: 'Tone', turns: 1, question: 'q', levels: ['a', 'b', 'c', 'd', 'e'] }],
+                    contextGroups: { persona: false },
+                } },
+            },
+        };
+        host(extensionSettings);
+        const stored = initSettings().presets.Mine;
+        assert.equal(stored.contextGroups.persona, false);
+        assert.equal(stored.contextGroups.main_prompt, true);
+        assert.equal(stored.jeved, 2);
+    });
+
+    it('stamps every preset it hands back with the schema this build knows', () => {
+        host({ jeved: { schema: 2, activePreset: 'Mine', presets: { Mine: { description: '', rules: [], sensors: [] } } } });
+        const settings = initSettings();
+        assert.deepEqual(Object.values(settings.presets).map(item => item.jeved), [2]);
+    });
+
+    it('reads the version off the presets when the file states none', () => {
+        const extensionSettings = {
+            jeved: {
+                activePreset: 'Mine',
+                presets: { Mine: {
+                    description: '',
+                    rules: [],
+                    storyWindow: 3,
+                    sensors: [{ id: 'tone', scope: 'story', question: 'q', levels: ['a', 'b', 'c', 'd', 'e'] }],
+                } },
+            },
+        };
+        const counts = host(extensionSettings);
+        const settings = initSettings();
+        assert.equal(settings.presets.Mine.sensors[0].turns, 3);
+        assert.equal(settings.schema, 2);
+        assert.equal(counts.saveCount, 1);
+    });
+});
+
+describe('settings from a newer Jeved', () => {
+    const future = () => ({
+        schema: 99,
+        enabled: true,
+        apiKey: 'k',
+        activePreset: 'Mine',
+        presets: { Mine: { description: '', sensors: [], rules: [], gap: 8, maxNudges: 1, futureField: 'keep' } },
+        somethingNew: true,
+    });
+
+    it('leaves them exactly as they are and saves nothing', () => {
+        const extensionSettings = { jeved: future() };
+        const counts = host(extensionSettings);
+        const settings = initSettings();
+
+        assert.deepEqual(settings, future());
+        assert.equal(settings.model, undefined);
+        assert.equal(counts.saveCount, 0);
+
+        saveSettings();
+        assert.equal(counts.saveCount, 0);
+    });
+
+    it('says once why, and still hands the active preset back', () => {
+        host({ jeved: future() });
+        initSettings();
+        assert.match(schemaProblem(), /schema 99/);
+        assert.equal(getPreset().futureField, 'keep');
+    });
+
+    it('goes back to work once a known file is loaded', () => {
+        host({ jeved: future() });
+        initSettings();
+        assert.notEqual(schemaProblem(), '');
+
+        const extensionSettings = {};
+        const counts = host(extensionSettings);
+        initSettings();
+        assert.equal(schemaProblem(), '');
+        saveSettings();
+        assert.ok(counts.saveCount > 1);
+    });
+});

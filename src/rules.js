@@ -1,0 +1,213 @@
+import { DEFAULT_ACTION, actionOf, ruleAction } from './actions.js';
+import { MAX_NUDGES } from './limits.js';
+import { replyWord, scoreText } from './util.js';
+
+export function scoreOf(entry, sensorId) {
+    const value = entry?.scores?.[sensorId];
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+export function conditionHolds(entry, condition) {
+    const value = scoreOf(entry, condition?.sensor);
+    if (value === null) {
+        return false;
+    }
+    if (condition.op === 'below') {
+        return value < condition.value;
+    }
+    if (condition.op === 'above') {
+        return value > condition.value;
+    }
+    return false;
+}
+
+function entryMatches(entry, conditions) {
+    return conditions.every(condition => conditionHolds(entry, condition));
+}
+
+export function matchingCount(history = [], rule = null) {
+    const conditions = (rule?.conditions ?? []).filter(condition => condition?.sensor);
+    if (!conditions.length) {
+        return 0;
+    }
+    const window = Math.max(1, Number(rule.window) || 1);
+    return history.slice(-window).filter(entry => entryMatches(entry, conditions)).length;
+}
+
+export function missingSensors(rule, sensorIds) {
+    const known = new Set(sensorIds);
+    const used = (rule?.conditions ?? []).map(condition => condition?.sensor);
+    if (rule?.skipWhen?.sensor) {
+        used.push(rule.skipWhen.sensor);
+    }
+    return [...new Set(used.filter(id => !known.has(id)))];
+}
+
+const formatScore = value => scoreText(value, 'missing');
+
+function moreReplies(count) {
+    return count === 1 ? '1 more reply' : `${count} more replies`;
+}
+
+function describe(rule, slice, count) {
+    const conditions = rule.conditions.map(condition => `${condition.sensor} ${condition.op} ${condition.value}`).join(' and ');
+    const values = slice.map(entry => formatScore(scoreOf(entry, rule.conditions[0].sensor))).join(', ');
+    return `${conditions} in ${count} of the last ${slice.length} replies: ${values}`;
+}
+
+function hasDirective(rule, action) {
+    return !!actionOf(action)?.spaced && !!String(rule.directive ?? '').trim();
+}
+
+function considered(rule, action, sensorIds) {
+    return !!rule?.enabled
+        && ruleAction(rule)?.id === action
+        && Array.isArray(rule.conditions)
+        && rule.conditions.length > 0
+        && missingSensors(rule, sensorIds).length === 0;
+}
+
+export function evaluate({
+    history = [],
+    rules = [],
+    sensorIds = [],
+    action = DEFAULT_ACTION,
+    gap = 0,
+    maxNudges = 1,
+    sinceAnyNudge = Infinity,
+    sinceRule = () => Infinity,
+} = {}) {
+    const latest = history.length ? history[history.length - 1] : null;
+    const fired = [];
+    let directives = 0;
+
+    for (const rule of rules) {
+        if (!considered(rule, action, sensorIds)) {
+            continue;
+        }
+        if (rule.skipWhen?.sensor && conditionHolds(latest, rule.skipWhen)) {
+            continue;
+        }
+        const slice = history.slice(-rule.window);
+        const count = slice.filter(entry => entryMatches(entry, rule.conditions)).length;
+        if (count < rule.need) {
+            continue;
+        }
+        if (sinceRule(rule.id) < (rule.cooldown ?? 0)) {
+            continue;
+        }
+        const directive = hasDirective(rule, action);
+        if (directive && (directives >= maxNudges || sinceAnyNudge < gap)) {
+            continue;
+        }
+        if (directive) {
+            directives++;
+        }
+        fired.push({ rule, reason: describe(rule, slice, count) });
+        if (actionOf(action)?.onlyOne) {
+            break;
+        }
+    }
+    return fired;
+}
+
+export function sinceFire(action, position, firedAt) {
+    if (firedAt === null || firedAt === undefined) {
+        return Infinity;
+    }
+    return position - firedAt + (actionOf(action)?.fireOffset ?? 0);
+}
+
+export function replayRule({ history = [], rule = null, sensorIds = [], gap = 0 } = {}) {
+    if (!rule || !Array.isArray(rule.conditions) || !rule.conditions.length) {
+        return [];
+    }
+    const candidate = { ...rule, enabled: true };
+    const action = ruleAction(candidate)?.id ?? DEFAULT_ACTION;
+    const turns = [];
+    let last = null;
+    for (let i = 0; i < history.length; i++) {
+        const since = sinceFire(action, i, last);
+        const hits = evaluate({
+            history: history.slice(0, i + 1),
+            rules: [candidate],
+            sensorIds,
+            action,
+            gap,
+            maxNudges: MAX_NUDGES.fallback,
+            sinceAnyNudge: since,
+            sinceRule: () => since,
+        });
+        if (hits.length) {
+            turns.push({ index: history[i].index, reason: hits[0].reason });
+            last = i;
+        }
+    }
+    return turns;
+}
+
+export function explain(rule, {
+    history = [],
+    sensorIds = [],
+    labels = {},
+    gap = 0,
+    sinceAnyNudge = Infinity,
+    sinceRule = () => Infinity,
+    lastFired = [],
+} = {}) {
+    const name = id => labels[id] || id;
+    if (rule && !ruleAction(rule)) {
+        return {
+            kind: 'warn',
+            text: 'Unknown action',
+            detail: `This rule uses the action '${rule.action}', which this version of Jeved does not have. Pick another action, or update Jeved.`,
+        };
+    }
+    if (!rule?.enabled) {
+        return { kind: 'idle', text: 'Off', detail: 'This rule is turned off.' };
+    }
+    const missing = missingSensors(rule, sensorIds);
+    if (missing.length) {
+        return { kind: 'warn', text: 'Sensor missing', detail: `No sensor is named ${missing.join(', ')}.` };
+    }
+    if (lastFired.includes(rule.id)) {
+        return { kind: 'fire', text: 'Fired', detail: 'This rule fired on the last turn.' };
+    }
+    const ownWait = Math.max(0, (rule.cooldown ?? 0) - sinceRule(rule.id));
+    const gapWait = hasDirective(rule, ruleAction(rule).id) ? Math.max(0, gap - sinceAnyNudge) : 0;
+    const waiting = Math.max(ownWait, gapWait);
+    if (waiting > 0 && Number.isFinite(waiting)) {
+        return {
+            kind: 'busy',
+            text: `Cooling down (${waiting})`,
+            detail: `This rule can fire again in ${replyWord(waiting)}.`,
+        };
+    }
+
+    const slice = history.slice(-rule.window);
+    const latest = slice.length ? slice[slice.length - 1] : null;
+    const measured = slice.filter(entry => rule.conditions.every(condition => scoreOf(entry, condition?.sensor) !== null)).length;
+    if (measured < rule.need) {
+        const short = moreReplies(rule.need - measured);
+        return { kind: 'idle', text: `Needs ${short}`, detail: `Jeved needs a score on ${short} before this rule can match.` };
+    }
+    if (rule.skipWhen?.sensor && conditionHolds(latest, rule.skipWhen)) {
+        return {
+            kind: 'warn',
+            text: 'Blocked',
+            detail: `Blocked because ${name(rule.skipWhen.sensor)} is ${rule.skipWhen.op} ${rule.skipWhen.value} on the latest reply.`,
+        };
+    }
+    const count = matchingCount(history, rule);
+    if (count < rule.need) {
+        return {
+            kind: 'idle',
+            text: `${count} of ${rule.need}`,
+            detail: `${count} of the last ${replyWord(slice.length)} ${count === 1 ? 'matches' : 'match'}. The rule fires at ${rule.need}.`,
+        };
+    }
+    if (lastFired.length) {
+        return { kind: 'idle', text: 'Outranked this turn', detail: 'Another rule fired first on this turn.' };
+    }
+    return { kind: 'fire', text: 'Fires next turn', detail: 'This rule will fire on your next message.' };
+}

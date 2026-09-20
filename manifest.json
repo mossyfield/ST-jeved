@@ -1,0 +1,17 @@
+{
+    "display_name": "Jeved",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "Jeved contributors",
+    "version": "0.1.0",
+    "homePage": "https://github.com/mossyfield/ST-jeved",
+    "auto_update": true,
+    "minimum_client_version": "1.18.0",
+    "generate_interceptor": "jeved_interceptGeneration",
+    "hooks": {
+        "clean": "jevedCleanUp"
+    }
+}

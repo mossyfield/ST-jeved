@@ -1,0 +1,14 @@
+{
+    "name": "st-jeved",
+    "version": "0.1.0",
+    "description": "Measures every reply in a SillyTavern roleplay and instructs the narrator only when a rule matches.",
+    "type": "module",
+    "private": true,
+    "license": "MIT",
+    "engines": {
+        "node": ">=20.11"
+    },
+    "scripts": {
+        "test": "node --test"
+    }
+}
