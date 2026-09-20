@@ -1,6 +1,7 @@
 import { DEFAULT_ACTION, actionOf } from '../actions.js';
 import { badgeFor, levelText, ruleLabel, scoreLine } from '../describe.js';
 import { JEVED_UPDATED } from '../engine.js';
+import { hasValue } from '../sensor-types.js';
 import { getPreset, getSettings, saveSettings } from '../settings.js';
 import { getScores, narratorIndices } from '../store.js';
 import { toast } from '../toast.js';
@@ -20,7 +21,7 @@ function scoreLines(chat, item) {
         return ["Those scores aren't saved any more."];
     }
     return preset.sensors
-        .filter(sensor => typeof scores[sensor.id] === 'number')
+        .filter(sensor => hasValue(sensor, scores[sensor.id]))
         .map(sensor => scoreLine(sensor, scores[sensor.id], {
             words: SillyTavern.getContext().substituteParams(levelText(sensor, scores[sensor.id])),
         }));

@@ -1,13 +1,16 @@
 import { actionIds, isKnownAction } from './actions.js';
 import { CONTEXT_KEYS, groupsUpTo } from './context-groups.js';
 import { blankRule, blankSensor } from './defaults.js';
-import { LEVEL_COUNT, TURNS } from './limits.js';
-import { GATE_OFFLINE, checkWalk } from './script-gate.js';
+import { TURNS } from './limits.js';
+import { DEFAULT_TYPE, confidenceLevel, isKnownType, typeIds, typeOf } from './sensor-types.js';
 import { clamp, isRecord } from './util.js';
 
-const ACTION_LIST = actionIds().map(id => `'${id}'`).join(' or ');
+const quoted = ids => ids.map(id => `'${id}'`).join(' or ');
 
-export const SCHEMA_VERSION = 2;
+const ACTION_LIST = quoted(actionIds());
+const TYPE_LIST = quoted(typeIds());
+
+export const SCHEMA_VERSION = 3;
 
 const UNSTAMPED_VERSION = 2;
 
@@ -49,18 +52,20 @@ export function uniqueName(name, taken = []) {
     return `${base} (${counter})`;
 }
 
+function unreadable(problem) {
+    return `Jeved can't read this script: ${String(problem).replace(/\.$/, '')}.`;
+}
+
 export function checkScript(script, parse = null) {
     const text = String(script ?? '').trim();
-    if (!text) {
+    if (!text || typeof parse !== 'function') {
         return '';
     }
-    if (typeof parse !== 'function') {
-        return GATE_OFFLINE;
-    }
     try {
-        return checkWalk(parse(text));
+        const problem = parse(text);
+        return problem ? unreadable(problem) : '';
     } catch (error) {
-        return checkWalk({ error: error?.message || 'the script could not be read' });
+        return unreadable(error?.message || 'the script could not be read');
     }
 }
 
@@ -112,6 +117,14 @@ const MIGRATIONS = new Map([
         }
         delete preset.storyWindow;
         delete preset.storyEvery;
+    }],
+    [2, preset => {
+        for (const sensor of Array.isArray(preset.sensors) ? preset.sensors : []) {
+            if (isRecord(sensor)) {
+                sensor.type = DEFAULT_TYPE;
+                sensor.options = [];
+            }
+        }
     }],
 ]);
 
@@ -167,19 +180,32 @@ export function upgradePreset(preset) {
     return stampVersion(preset);
 }
 
-function checkCondition(condition, where, sensorIds, problems) {
+function checkCondition(condition, where, sensors, problems) {
     if (!isRecord(condition)) {
         problems.push(`${where}: it is not a condition`);
         return;
     }
-    if (!sensorIds.includes(String(condition.sensor ?? ''))) {
+    const sensor = sensors.find(item => item.id === String(condition.sensor ?? ''));
+    if (!sensor) {
         problems.push(`${where}: no sensor named '${condition.sensor}'`);
+        return;
     }
-    if (condition.op !== 'below' && condition.op !== 'above') {
-        problems.push(`${where}: the test must be 'below' or 'above'`);
+    const type = typeOf(sensor);
+    if (!type.ops.includes(condition.op)) {
+        problems.push(`${where}: the test must be ${quoted(type.ops)}`);
+    } else {
+        const problem = type.valueProblem(sensor, condition.value);
+        if (problem) {
+            problems.push(`${where}: ${problem}`);
+        }
     }
-    if (!Number.isFinite(Number(condition.value))) {
-        problems.push(`${where}: the value is not a number`);
+    if (condition.minConfidence === null || condition.minConfidence === undefined) {
+        return;
+    }
+    if (!type.hasConfidence) {
+        problems.push(`${where}: a noul sensor has no confidence`);
+    } else if (confidenceLevel(condition.minConfidence) === null) {
+        problems.push(`${where}: the confidence must be a number from 0 to 1`);
     }
 }
 
@@ -195,6 +221,7 @@ export function validatePreset(data, { parse = null } = {}) {
         return ['The preset needs a list of sensors and a list of rules.'];
     }
 
+    const known = [];
     const sensorIds = [];
     data.sensors.forEach((sensor, index) => {
         const where = `sensor ${index + 1}`;
@@ -212,6 +239,7 @@ export function validatePreset(data, { parse = null } = {}) {
             problems.push(`${named}: two sensors have that id`);
         } else {
             sensorIds.push(id);
+            known.push(sensor);
         }
         if (clamp(sensor.turns, TURNS) !== Number(sensor.turns)) {
             problems.push(`${named}: turns must be a whole number from ${TURNS.min} to ${TURNS.max}`);
@@ -225,10 +253,10 @@ export function validatePreset(data, { parse = null } = {}) {
         if (!String(sensor.question ?? '').trim()) {
             problems.push(`${named}: it has no question`);
         }
-        if (!Array.isArray(sensor.levels) || sensor.levels.length !== LEVEL_COUNT) {
-            problems.push(`${named}: it needs ${LEVEL_COUNT} score descriptions`);
-        } else if (sensor.levels.filter(level => String(level ?? '').trim()).length < 2) {
-            problems.push(`${named}: it needs at least two score descriptions filled in`);
+        if (sensor.type !== undefined && !isKnownType(sensor.type)) {
+            problems.push(`${named}: the type must be ${TYPE_LIST}`);
+        } else {
+            problems.push(...typeOf(sensor).problems(sensor).map(problem => `${named}: ${problem}`));
         }
     });
 
@@ -257,11 +285,11 @@ export function validatePreset(data, { parse = null } = {}) {
             problems.push(`${named}: it has no conditions`);
         } else {
             rule.conditions.forEach((condition, position) => {
-                checkCondition(condition, `${named}, condition ${position + 1}`, sensorIds, problems);
+                checkCondition(condition, `${named}, condition ${position + 1}`, known, problems);
             });
         }
         if (rule.skipWhen !== null && rule.skipWhen !== undefined) {
-            checkCondition(rule.skipWhen, `${named}, exception`, sensorIds, problems);
+            checkCondition(rule.skipWhen, `${named}, exception`, known, problems);
         }
         if (!String(rule.directive ?? '').trim() && !String(rule.script ?? '').trim()) {
             problems.push(`${named}: it needs an instruction or a script`);
@@ -284,8 +312,28 @@ export function exportFileName(name) {
 }
 
 const SENSOR_FIELDS = Object.keys(blankSensor(''));
-const RULE_FIELDS = Object.keys(blankRule('', ''));
-const CONDITION_FIELDS = ['sensor', 'op', 'value'];
+const RULE_FIELDS = Object.keys(blankRule('', null));
+const CONDITION_FIELDS = ['sensor', 'op', 'value', 'minConfidence'];
+
+function conditionsOf(rule) {
+    return [...(Array.isArray(rule?.conditions) ? rule.conditions : []), rule?.skipWhen].filter(isRecord);
+}
+
+export function renameOption(rules, sensorId, renames) {
+    const wanted = new Map([...(renames ?? [])]
+        .map(([from, to]) => [String(from ?? '').trim(), String(to ?? '').trim()]));
+    let changed = 0;
+    for (const rule of Array.isArray(rules) ? rules : []) {
+        for (const condition of conditionsOf(rule)) {
+            const held = typeof condition.value === 'string' ? condition.value.trim() : condition.value;
+            if (condition.sensor === sensorId && wanted.has(held)) {
+                condition.value = wanted.get(held);
+                changed++;
+            }
+        }
+    }
+    return changed;
+}
 
 function pick(source, fields) {
     const kept = {};

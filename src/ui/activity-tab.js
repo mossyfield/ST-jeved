@@ -1,14 +1,15 @@
 import { decisionSentence, entryWords, excerpt, levelText, rescanSentence, ruleLabel, scoreLine, stripChart } from '../describe.js';
 import { cancelRescan, chatPreset, clearChatScores, isRescanning, lastDecision, measureBlockReason, measuredCount, planMeasurement, plannedCalls, rescan } from '../engine.js';
+import { conditionTail, findSensor, hasValue, valueText } from '../sensor-types.js';
 import { carryForwardIds, measuredSensors } from '../sensors.js';
 import { getPreset, getSettings } from '../settings.js';
-import { currentChat, fired, getHistory, getScores, isNarrator, lastUserIndex, latestScores } from '../store.js';
+import { currentChat, fired, getHistory, isNarrator, lastUserIndex } from '../store.js';
 import { toast } from '../toast.js';
-import { scoreText } from '../util.js';
 import { ask } from './dialogs.js';
 import { actions, activate, button, help, node, section, text, withReason } from './dom.js';
 
 const COLUMNS = 20;
+const CELL_CHARS = 2;
 
 let progress = null;
 
@@ -22,10 +23,15 @@ function firedOnReply(index) {
 }
 
 function buildColumns(preset) {
-    return getHistory(currentChat(), COLUMNS, carryForwardIds(preset));
+    return getHistory(currentChat(), COLUMNS, carryForwardIds(preset), preset.sensors);
 }
 
-function cellElement(cell, label, onPick) {
+function cellText(sensor, value) {
+    const shown = valueText(sensor, value, '');
+    return typeof value === 'string' ? shown.slice(0, CELL_CHARS) : shown;
+}
+
+function cellElement(cell, sensor, label, onPick) {
     const classes = ['jeved-cell'];
     if (cell.value === null) {
         classes.push('jeved-cell--empty');
@@ -37,18 +43,18 @@ function cellElement(cell, label, onPick) {
         classes.push('jeved-cell--on');
     }
     const element = node('div', classes.join(' '), {
-        title: `Reply ${cell.index}. ${label}: ${scoreText(cell.value)}${cell.carried ? ' (carried over)' : ''}`,
+        title: `Reply ${cell.index}. ${label}: ${valueText(sensor, cell.value)}${cell.carried ? ' (carried over)' : ''}`,
         tabIndex: 0,
     });
     element.dataset.jevedIndex = String(cell.index);
     if (cell.value !== null) {
-        element.textContent = scoreText(cell.value, '');
+        element.textContent = cellText(sensor, cell.value);
     }
     activate(element, () => onPick(cell.index));
     return element;
 }
 
-function stripElement(chart, onPick) {
+function stripElement(chart, sensors, onPick) {
     const strip = node('div', 'jeved-strip', { id: 'jeved_strip' });
     const track = `repeat(${COLUMNS}, minmax(6px, 1fr))`;
     const offset = String(Math.max(1, COLUMNS - chart.columns.length + 1));
@@ -74,11 +80,12 @@ function stripElement(chart, onPick) {
     strip.append(marks);
 
     for (const row of chart.rows) {
+        const sensor = findSensor(sensors, row.id);
         const line = node('div', 'jeved-strip-row');
         const cells = node('div', 'jeved-strip-cells');
         cells.style.gridTemplateColumns = track;
         row.cells.forEach((cell, position) => {
-            const element = cellElement(cell, row.label, onPick);
+            const element = cellElement(cell, sensor, row.label, onPick);
             if (!position) {
                 element.style.gridColumnStart = offset;
             }
@@ -87,7 +94,7 @@ function stripElement(chart, onPick) {
         const label = node('span', 'jeved-strip-label');
         label.append(text('span', 'jeved-strip-name', row.label));
         for (const tick of row.ticks) {
-            label.append(text('span', 'jeved-strip-rule', `${tick.op === 'above' ? '>' : '<'} ${tick.value}`));
+            label.append(text('span', 'jeved-strip-rule', conditionTail(tick.condition, sensors)));
         }
         line.append(label, cells);
         strip.append(line);
@@ -95,28 +102,26 @@ function stripElement(chart, onPick) {
     return strip;
 }
 
-function detailElement(preset, index) {
+function detailElement(preset, index, entry) {
     const block = node('div', 'jeved-detail', { id: 'jeved_detail' });
     if (index === null) {
         block.append(help('Pick a column to see what happened on that reply.'));
         return block;
     }
     const context = SillyTavern.getContext();
-    const messages = currentChat();
-    const message = messages[index];
+    const message = currentChat()[index];
     block.append(text('h4', 'jeved-section-title', `Reply ${index}`));
     block.append(text('div', 'jeved-excerpt', excerpt(message?.mes, 240)));
 
-    const own = getScores(message)?.scores ?? {};
-    const carried = isNarrator(message) ? latestScores(messages, carryForwardIds(preset), index) : {};
-    const scores = { ...carried, ...own };
+    const own = entry?.own ?? {};
+    const scores = entry?.scores ?? {};
     const lines = measuredSensors(preset)
-        .filter(sensor => typeof scores[sensor.id] === 'number')
+        .filter(sensor => hasValue(sensor, scores[sensor.id]))
         .map(sensor => scoreLine(sensor, scores[sensor.id], {
             words: context.substituteParams(levelText(sensor, scores[sensor.id])),
-            carried: typeof own[sensor.id] !== 'number',
+            carried: own[sensor.id] === undefined,
         }));
-    block.append(...(lines.length ? lines.map(line => text('div', 'jeved-detail-line', line)) : [help('This reply has no scores.')]));
+    block.append(...(lines.length ? lines.map(line => text('div', 'jeved-detail-line', line)) : [help('This reply has no answers.')]));
 
     const entries = firedOnReply(index);
     if (!entries.length) {
@@ -195,12 +200,12 @@ export function activityTab(host) {
         } else if (!columns.length) {
             children.push(help('This chat has no replies yet.'));
         } else {
-            children.push(stripElement(stripChart({ columns, sensors, rules: preset.rules, fired: firedBy }), index => {
+            children.push(stripElement(stripChart({ columns, sensors, rules: preset.rules, fired: firedBy }), sensors, index => {
                 picked = index;
                 draw();
             }));
-            children.push(help("The newest reply is on the right. An amber score met a rule's condition, and a faded score was carried over."));
-            children.push(detailElement(preset, picked));
+            children.push(help("The newest reply is on the right. An amber answer met a rule's condition, and a faded answer was carried over."));
+            children.push(detailElement(preset, picked, columns.find(column => column.index === picked)));
         }
 
         children.push(text('div', 'jeved-decision', decisionSentence(lastDecision(), preset.rules)));

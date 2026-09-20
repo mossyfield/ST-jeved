@@ -1,5 +1,8 @@
 export const LEVEL_COUNT = 5;
-export const SCALE_MAX = LEVEL_COUNT - 1;
+
+export const LEVELS = { min: 2, max: 10 };
+export const OPTIONS = { min: 2, max: 255 };
+export const CONFIDENCE = { min: 0, max: 1, fallback: 0.7, step: 0.01, decimals: 2, percent: true };
 
 export const TURNS = { min: 1, max: 50, fallback: 1 };
 export const RULE_COUNTS = { min: 1, max: 1000, fallback: 1 };

@@ -1,4 +1,5 @@
-import { LEVEL_COUNT, TURNS } from './limits.js';
+import { TURNS } from './limits.js';
+import { typeOf } from './sensor-types.js';
 import { lastUserIndex, narratorIndices } from './store.js';
 import { clamp } from './util.js';
 
@@ -24,9 +25,9 @@ export function neededSensorIds(preset) {
 
 function usable(sensor) {
     return !!sensor
-        && String(sensor.id ?? '').trim()
-        && String(sensor.question ?? '').trim()
-        && (sensor.levels ?? []).filter(level => String(level ?? '').trim()).length >= 2;
+        && !!String(sensor.id ?? '').trim()
+        && !!String(sensor.question ?? '').trim()
+        && typeOf(sensor).usable(sensor);
 }
 
 function turnsOf(sensor) {
@@ -79,8 +80,10 @@ export function groupSensors(preset, { due = null, only = null } = {}) {
 function sensorSpec(sensor) {
     return {
         id: sensor.id,
+        type: typeOf(sensor).id,
         question: String(sensor.question ?? ''),
         levels: (sensor.levels ?? []).map(level => String(level ?? '')),
+        options: (sensor.options ?? []).map(option => ({ ...option })),
     };
 }
 
@@ -114,8 +117,13 @@ function buildQuestions(sensors, substitute) {
     const questions = Object.create(null);
     for (const sensor of sensors) {
         questions[sensor.id] = {
+            type: typeOf(sensor).id,
             question: substitute(sensor.question),
-            levels: sensor.levels.slice(0, LEVEL_COUNT).map(level => substitute(level)),
+            levels: (sensor.levels ?? []).map(level => substitute(level)),
+            options: (sensor.options ?? []).map(option => ({
+                name: String(option?.name ?? ''),
+                description: substitute(option?.description),
+            })),
         };
     }
     return questions;

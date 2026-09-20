@@ -1,21 +1,21 @@
 import { ACTIONS, DEFAULT_ACTION, REROLL, actionOf } from '../actions.js';
 import { blankRule } from '../defaults.js';
-import { RULE_COOLDOWN, RULE_COUNTS } from '../limits.js';
-import { bandText, excerpt, findSensor, gaugeFor, previewSentence, ruleBrief, ruleLabel, ruleProblem, ruleSummary, sensorLabel } from '../describe.js';
+import { CONFIDENCE, RULE_COOLDOWN, RULE_COUNTS } from '../limits.js';
+import { bandText, excerpt, previewSentence, ruleBrief, ruleLabel, ruleProblem, ruleSummary } from '../describe.js';
 import { evaluationContext, historyStamp, lastDecision, measuredCount, scriptParser } from '../engine.js';
 import { checkScript, slugId, validatePreset } from '../presets.js';
-import { explain, replayRule } from '../rules.js';
+import { conditionHolds, explain, replayRule, scoreOf } from '../rules.js';
+import { findSensor, opOf, rangeOf, seedCondition, sensorLabel, typeOf, valueText } from '../sensor-types.js';
 import { carryForwardIds } from '../sensors.js';
 import { getPreset, normalisePreset, saveSettings } from '../settings.js';
 import { currentChat, getHistory } from '../store.js';
 import { ask } from './dialogs.js';
-import { actions, area, button, clampNumber, column, field, fold, formRow, gauge, help, iconButton, node, picker, resultsBox, row, section, segmented, slider, text, toggle, withReason } from './dom.js';
+import { actions, area, button, clampNumber, column, field, fold, formRow, help, iconButton, node, picker, resultsBox, row, section, segmented, slider, tag, text, toggle, withReason } from './dom.js';
 import { masterDetail } from './master.js';
 
 const PREVIEW_TURNS = 50;
 const PREVIEW_DELAY = 250;
 
-const OP_OPTIONS = [{ value: 'below', label: 'is below' }, { value: 'above', label: 'is above' }];
 const ACTION_OPTIONS = ACTIONS.map(action => ({ value: action.id, label: action.label }));
 function sensorOptions(preset) {
     return preset.sensors.map(sensor => ({
@@ -24,10 +24,20 @@ function sensorOptions(preset) {
     }));
 }
 
+function opOptions(type) {
+    return type.ops.map(id => ({ value: id, label: opOf(id).label }));
+}
+
+function valueOptions(sensor) {
+    return (sensor?.options ?? [])
+        .map(option => String(option?.name ?? '').trim())
+        .filter(name => name)
+        .map(name => ({ value: name, label: name }));
+}
+
 function ruleState(preset) {
     return {
         ...evaluationContext(currentChat(), preset),
-        labels: Object.fromEntries(preset.sensors.map(sensor => [sensor.id, sensorLabel(preset.sensors, sensor.id)])),
         lastFired: (lastDecision()?.fired ?? []).map(entry => entry.rule),
     };
 }
@@ -39,37 +49,97 @@ function candidateRule(draft, preset, taken) {
     return candidate;
 }
 
-function conditionRow(preset, condition, onChange, onRemove) {
+export function conditionRow(preset, condition, onChange, onRemove) {
     const block = column('jeved-condition');
+    const line = row();
     const band = help('');
+    const confidence = node('div', 'jeved-condition-sure');
+    const sensorOf = () => findSensor(preset.sensors, condition.sensor);
+
     const paintBand = () => {
-        band.textContent = bandText(findSensor(preset.sensors, condition.sensor), condition.value);
+        band.textContent = bandText(sensorOf(), condition.value);
     };
-    const line = row(
-        picker(sensorOptions(preset), condition.sensor, value => {
-            condition.sensor = value;
-            paintBand();
-            onChange();
-        }),
-        picker(OP_OPTIONS, condition.op, value => {
-            condition.op = value;
-            onChange();
-        }),
-        slider(condition.value, value => {
+
+    const valueControl = sensor => {
+        const range = rangeOf(sensor);
+        if (!range) {
+            return picker(valueOptions(sensor), condition.value, value => {
+                condition.value = value;
+                paintBand();
+                onChange();
+            });
+        }
+        return slider(condition.value, value => {
             condition.value = value;
             paintBand();
             onChange();
-        }, { label: 'Threshold' }),
-        onRemove ? iconButton('fa-xmark', 'Remove this condition', onRemove) : null,
-    );
-    paintBand();
-    block.append(line, band);
+        }, { range, label: range.percent ? 'Threshold (%)' : 'Threshold' });
+    };
+
+    const drawConfidence = () => {
+        const type = typeOf(sensorOf());
+        if (!type.hasConfidence) {
+            condition.minConfidence = null;
+            confidence.replaceChildren();
+            return;
+        }
+        const on = condition.minConfidence !== null && condition.minConfidence !== undefined;
+        const line = row(
+            toggle(on, 'Match only when Jev is this sure', value => {
+                condition.minConfidence = value ? CONFIDENCE.fallback : null;
+                drawConfidence();
+                onChange();
+            }),
+            text('span', 'jeved-inline-label', 'Minimum confidence (%)'),
+            on
+                ? slider(condition.minConfidence, value => {
+                    condition.minConfidence = value;
+                    onChange();
+                }, { range: CONFIDENCE, label: 'Minimum confidence (%)' })
+                : null,
+        );
+        confidence.replaceChildren(line, ...(on
+            ? [help('Jev reports how strongly it favoured its answer over the others, and this condition ignores answers below that level.')]
+            : []));
+    };
+
+    const draw = () => {
+        const sensor = sensorOf();
+        line.replaceChildren(...[
+            picker(sensorOptions(preset), condition.sensor, value => {
+                Object.assign(condition, seedCondition(findSensor(preset.sensors, value)));
+                draw();
+                onChange();
+            }),
+            picker(opOptions(typeOf(sensor)), condition.op, value => {
+                condition.op = value;
+                onChange();
+            }),
+            valueControl(sensor),
+            onRemove ? iconButton('fa-xmark', 'Remove this condition', onRemove) : null,
+        ].filter(child => child));
+        paintBand();
+        drawConfidence();
+    };
+
+    draw();
+    block.append(line, band, confidence);
     return block;
+}
+
+export function latestLines(rule, latest, sensors) {
+    return (rule?.conditions ?? [])
+        .filter(condition => condition?.sensor)
+        .map(condition => {
+            const value = scoreOf(latest, condition.sensor);
+            const words = `${sensorLabel(sensors, condition.sensor)}: ${valueText(findSensor(sensors, condition.sensor), value)}`;
+            return { words, match: value === null ? '' : conditionHolds(latest, condition) ? 'Matches' : 'Does not match' };
+        });
 }
 
 function previewBlock(preset, saved, api, currentDraft) {
     const sentence = text('div', 'jeved-preview-line', '');
-    const meter = node('div', 'jeved-preview-gauge');
+    const meter = node('div', 'jeved-preview-latest');
     const box = resultsBox({ clearable: false });
     const turns = fold('Show replies', box.element);
     let stamp = '';
@@ -78,7 +148,12 @@ function previewBlock(preset, saved, api, currentDraft) {
 
     const historyFor = action => {
         const known = actionOf(action) ?? actionOf(DEFAULT_ACTION);
-        histories[known.id] ??= getHistory(currentChat(), currentChat().length, known.usesCarriedScores ? carryForwardIds(preset) : []);
+        histories[known.id] ??= getHistory(
+            currentChat(),
+            currentChat().length,
+            known.usesCarriedScores ? carryForwardIds(preset) : [],
+            preset.sensors,
+        );
         return histories[known.id];
     };
 
@@ -86,6 +161,7 @@ function previewBlock(preset, saved, api, currentDraft) {
         history: historyFor(rule.action),
         rule,
         sensorIds: preset.sensors.map(sensor => sensor.id),
+        sensors: preset.sensors,
         gap: preset.gap,
     });
 
@@ -104,10 +180,13 @@ function previewBlock(preset, saved, api, currentDraft) {
         const candidate = currentDraft();
         const draftTurns = replay(candidate);
         sentence.textContent = previewSentence(savedTurns, draftTurns, measuredCount());
-        meter.replaceChildren(formRow(
-            'Latest score against the threshold',
-            gauge(gaugeFor(candidate, historyFor(candidate.action))),
-        ));
+        const lines = latestLines(candidate, historyFor(candidate.action).at(-1) ?? null, preset.sensors);
+        meter.replaceChildren(...(lines.length
+            ? [formRow('Latest reply', column('', ...lines.map(line => row(
+                text('span', 'jeved-readout', line.words),
+                line.match ? tag(line.match, line.match === 'Matches' ? 'on' : '') : null,
+            ))))]
+            : []));
         const shown = draftTurns.slice(-PREVIEW_TURNS);
         box.show('', shown.map(turn => ({ index: turn.index, text: excerpt(currentChat()[turn.index]?.mes) })));
         if (draftTurns.length > shown.length) {
@@ -179,7 +258,7 @@ function rulePane(preset, draft, api, host, { saved, otherIds }, move) {
     const drawUnless = () => {
         const children = [row(
             toggle(!!draft.skipWhen?.sensor, 'Skip this rule when the latest reply matches', value => {
-                draft.skipWhen = value ? { sensor: preset.sensors[0]?.id ?? '', op: 'above', value: 2 } : null;
+                draft.skipWhen = value ? seedCondition(preset.sensors[0]) : null;
                 drawUnless();
                 touch();
             }),
@@ -249,7 +328,7 @@ function rulePane(preset, draft, api, host, { saved, otherIds }, move) {
             'When',
             conditions,
             actions(button('Add condition', 'Add another condition', () => {
-                draft.conditions.push({ sensor: preset.sensors[0]?.id ?? '', op: 'below', value: 2 });
+                draft.conditions.push(seedCondition(preset.sensors[0]));
                 drawConditions();
                 touch();
             }, { icon: 'fa-plus' })),
@@ -258,7 +337,7 @@ function rulePane(preset, draft, api, host, { saved, otherIds }, move) {
         section(
             'Then',
             formRow('Action', actionPicker),
-            formRow('Instruction (OOC)', instruction, "Describe the result you want in the story. Don't mention scores or Jeved."),
+            formRow('Instruction (OOC)', instruction, "Describe the result you want in the story. Don't mention answers or Jeved."),
         ),
         fold(
             'More options',
@@ -275,7 +354,7 @@ function rulePane(preset, draft, api, host, { saved, otherIds }, move) {
                     api.markDirty();
                 }),
                 scriptNote,
-            ), 'The script runs when the rule fires, and Jeved allows only a short list of commands, so /gen, /trigger and /swipe are refused.'),
+            ), 'The script runs on its own when the rule fires, so read it before you turn the rule on.'),
         ),
         preview.element,
         bar,
@@ -303,7 +382,7 @@ export function rulesTab(host) {
         pickText: 'Pick a rule, or add one.',
         items: () => preset.rules,
         identity: () => preset,
-        blankDraft: seed => ({ ...blankRule('', seed || preset.sensors[0]?.id || ''), enabled: true }),
+        blankDraft: seed => ({ ...blankRule('', findSensor(preset.sensors, seed) ?? preset.sensors[0] ?? null), enabled: true }),
         draftOf: item => structuredClone(item),
         beforeRows: () => ruleState(preset),
         rowOf: (rule, index, api, evaluation) => {

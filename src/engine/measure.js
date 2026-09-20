@@ -1,11 +1,12 @@
 import { cancelled, isCancelled, provider } from '../classifier.js';
 import { buildContext } from '../instructions.js';
+import { hasValue, typeOf } from '../sensor-types.js';
 import { buildRequest, groupSensors, groupSpec, measuredSensors, requestKey } from '../sensors.js';
 import { getPreset, getSettings } from '../settings.js';
 import { clearScores, getScores, isNarrator, narratorIndices, writeScores } from '../store.js';
 import { hashText } from '../util.js';
 import {
-    addCost, clearError, describeError, invalidateMeasured, isPaused, markPreset, measureBlockReason,
+    addCost, addTokens, clearError, describeError, invalidateMeasured, isPaused, markPreset, measureBlockReason,
     measuredCount, measuredStamp, notify, setError, setMeasuring,
 } from './status.js';
 
@@ -91,8 +92,10 @@ export async function call(request, signal) {
         state: request.state,
         questions: request.questions,
         signal: workSignal(signal),
+        headers: () => SillyTavern.getContext().getRequestHeaders?.() ?? null,
     });
     addCost(result.cost);
+    addTokens(result.tokens);
     return result;
 }
 
@@ -115,12 +118,12 @@ export function locate(target) {
         : context.chat.indexOf(target.message);
 }
 
-function commit(target, scores, stamp) {
+function commit(target, result, stamp) {
     if (stamp !== revision || isPaused() || locate(target) < 0) {
         return false;
     }
     const fresh = measuredCount() === 0;
-    writeScores(target.message, scores, target.hash);
+    writeScores(target.message, result.scores, target.hash, result.confidence);
     invalidateMeasured();
     if (fresh) {
         markPreset();
@@ -187,7 +190,7 @@ async function runMeasurement(target, signal) {
             }
             continue;
         }
-        stored += commit(target, result.value.scores, stamp) ? 1 : 0;
+        stored += commit(target, result.value, stamp) ? 1 : 0;
     }
     if (current && results.every(result => result.status === 'fulfilled')) {
         clearError();
@@ -271,9 +274,12 @@ export async function testSensor(sensor, count, { signal, onResult } = {}) {
         const row = { index, text: String(context.chat[index]?.mes ?? '') };
         try {
             if (!build) {
-                throw new Error('This sensor needs a question and two score descriptions.');
+                throw new Error(typeOf(sensor).needs);
             }
-            row.score = (await call(build(index, group), signal)).scores[id];
+            const result = await call(build(index, group), signal);
+            row.value = result.scores[id];
+            row.confidence = result.confidence[id];
+            row.probabilities = result.probabilities[id];
         } catch (error) {
             if (isCancelled(error)) {
                 break;
@@ -301,10 +307,12 @@ export function planMeasurement({ limit = Infinity, all = false, sensorId = '' }
     const tasks = [];
     let calls = 0;
 
+    const byId = new Map((preset.sensors ?? []).map(sensor => [sensor.id, sensor]));
+
     indices.slice(0, limit).forEach((index, offset) => {
         const stored = getScores(context.chat[index])?.scores ?? {};
         const groups = groupsFor(preset, indices.length - offset, id => (!sensorId || id === sensorId)
-            && (all || typeof stored[id] !== 'number'));
+            && (all || !hasValue(byId.get(id) ?? null, stored[id])));
         if (!groups.length) {
             return;
         }

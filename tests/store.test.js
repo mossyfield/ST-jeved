@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { addFired, clearScores, fired, firedRule, getHistory, getScores, nudged, repliesSince, stripFiredText, writeDecision, writeScores } from '../src/store.js';
+import { addFired, clearScores, fired, firedRule, getHistory, getScores, latestScores, nudged, repliesSince, stripFiredText, writeDecision, writeScores } from '../src/store.js';
 import { hashText } from '../src/util.js';
 
 const narrator = mes => ({ mes, is_user: false });
@@ -163,6 +163,96 @@ describe('getHistory carry forward', () => {
         measured(chat, 1, { tone: 3 });
         measured(chat, 2, {});
         assert.equal(getHistory(chat, 1, ['tone'])[0].scores.tone, 3);
+    });
+});
+
+describe('confidence beside the value', () => {
+    const measured = (message, scores, confidence) => writeScores(message, scores, hashText(message.mes), confidence);
+
+    it('keeps the confidence that came with a value', () => {
+        const message = narrator('one');
+        measured(message, { change: 2 }, { change: 0.8 });
+        assert.equal(getScores(message).confidence.change, 0.8);
+    });
+
+    it('clears the old confidence when the new answer carries none', () => {
+        const message = narrator('one');
+        measured(message, { change: 2 }, { change: 0.8 });
+        writeScores(message, { change: 3 });
+        assert.equal(getScores(message).confidence.change, undefined);
+        assert.equal(getScores(message).scores.change, 3);
+    });
+
+    it('leaves the confidence of a sensor the call did not answer alone', () => {
+        const message = narrator('one');
+        measured(message, { change: 2 }, { change: 0.8 });
+        measured(message, { tone: 1 }, { tone: 0.2 });
+        assert.deepEqual(getScores(message).confidence, { change: 0.8, tone: 0.2 });
+    });
+
+    it('refuses a confidence that is not a finite number', () => {
+        const message = narrator('one');
+        measured(message, { change: 2 }, { change: '0.8' });
+        assert.equal(getScores(message).confidence.change, undefined);
+    });
+
+    it('reports the confidence on the history entry it belongs to', () => {
+        const chat = [narrator('a'), narrator('b')];
+        measured(chat[0], { change: 2 }, { change: 0.6 });
+        writeScores(chat[1], { change: 3 });
+        assert.deepEqual(getHistory(chat, 2).map(entry => entry.confidence.change), [0.6, undefined]);
+    });
+
+    it('carries a word value forward with the confidence it was given', () => {
+        const chat = [narrator('a'), narrator('b')];
+        measured(chat[0], { mood: 'calm' }, { mood: 0.9 });
+        writeScores(chat[1], { change: 2 });
+        const [, latest] = getHistory(chat, 2, ['mood']);
+        assert.equal(latest.scores.mood, 'calm');
+        assert.equal(latest.confidence.mood, 0.9);
+    });
+
+    it('drops the carried confidence once a later reply was measured without one', () => {
+        const chat = [narrator('a'), narrator('b'), narrator('c')];
+        measured(chat[0], { mood: 'calm' }, { mood: 0.9 });
+        writeScores(chat[1], { mood: 'angry' });
+        writeScores(chat[2], {});
+        const [, , newest] = getHistory(chat, 3, ['mood']);
+        assert.equal(newest.scores.mood, 'angry');
+        assert.equal(newest.confidence.mood, undefined);
+    });
+});
+
+describe('a stored value that no longer fits its sensor', () => {
+    const picker = [{ id: 'mood', type: 'choice', options: [{ name: 'calm', description: '' }, { name: 'angry', description: '' }] }];
+
+    it('reads as not measured once the option is gone', () => {
+        const chat = [narrator('a')];
+        writeScores(chat[0], { mood: 'bored' });
+        assert.equal(getHistory(chat, 1, [], picker)[0].scores.mood, undefined);
+        assert.equal(getHistory(chat, 1)[0].scores.mood, 'bored');
+    });
+
+    it('reads as not measured once the sensor changed type', () => {
+        const chat = [narrator('a')];
+        writeScores(chat[0], { mood: 3 });
+        assert.equal(getHistory(chat, 1, [], picker)[0].scores.mood, undefined);
+    });
+
+    it('reads as not measured once the scale got shorter', () => {
+        const chat = [narrator('a')];
+        writeScores(chat[0], { tone: 3 });
+        assert.equal(getHistory(chat, 1, [], [{ id: 'tone', levels: ['a', 'b'] }])[0].scores.tone, undefined);
+        assert.equal(getHistory(chat, 1, [], [{ id: 'tone', levels: ['a', 'b', 'c', 'd'] }])[0].scores.tone, 3);
+    });
+
+    it('is not carried forward and is not the latest score either', () => {
+        const chat = [narrator('a'), narrator('b')];
+        writeScores(chat[0], { mood: 'bored' });
+        writeScores(chat[1], {});
+        assert.equal(getHistory(chat, 2, ['mood'], picker)[1].scores.mood, undefined);
+        assert.equal(latestScores(chat, ['mood'], 2, picker).mood, undefined);
+        assert.equal(latestScores(chat, ['mood'], 2).mood, 'bored');
     });
 });
 

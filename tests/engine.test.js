@@ -97,11 +97,13 @@ describe('interceptGeneration', () => {
         assert.ok(copy[2].mes.includes('(OOC: raise the pressure on Aria.)'));
     });
 
-    it('does not run a script that would start a reply, and says so', async () => {
-        setup([rule({ script: '/echo one | /swipe' })]);
+    it('runs a script whatever commands it holds', async () => {
+        setup([rule({ script: '/setvar key=mood calm | /imagine scene' })]);
+        setErrorText('', '');
         await interceptGeneration(copyOf(), 100, () => {}, 'normal');
-        assert.equal(scripts.length, 0);
-        assert.match(lastError(), /didn't run/);
+        assert.equal(scripts.length, 1);
+        assert.equal(scripts[0].script, '/setvar key=mood calm | /imagine scene');
+        assert.equal(lastError(), '');
         assert.deepEqual(fired(context.chat[2]).map(entry => entry.rule), ['flat']);
     });
 

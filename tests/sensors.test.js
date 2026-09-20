@@ -52,6 +52,37 @@ describe('which sensors are measured', () => {
         preset.sensors.find(sensor => sensor.id === 'change').question = '  ';
         assert.deepEqual(ids(preset), ['tension', 'repeats', 'tone']);
     });
+
+    it('needs two options before it asks a choice sensor, and asks a yes or no sensor with none', () => {
+        const one = sensor({ id: 'mood', type: 'choice', levels: [], options: [{ name: 'calm', description: '' }] });
+        const two = sensor({ id: 'mood', type: 'choice', levels: [], options: [{ name: 'calm', description: '' }, { name: 'angry', description: '' }] });
+        assert.deepEqual(ids(presetOf(one)), []);
+        assert.deepEqual(ids(presetOf(two)), ['mood']);
+        assert.deepEqual(ids(presetOf(sensor({ id: 'danger', type: 'noul', levels: [] }))), ['danger']);
+    });
+});
+
+describe('the question a sensor of each type carries', () => {
+    const askFor = (...list) => {
+        const [group] = groupSensors(presetOf(...list));
+        return buildRequest([narrator('hi')], 0, groupSpec(group), null, substitute).questions;
+    };
+
+    it('carries the type, the options and every description', () => {
+        const questions = askFor(
+            sensor({ id: 'mood', type: 'choice', levels: [], options: [{ name: 'calm', description: 'Settled.' }, { name: 'angry', description: 'Furious.' }] }),
+            sensor({ id: 'danger', type: 'noul', levels: ['No.', 'Yes.'] }),
+        );
+        assert.equal(questions.mood.type, 'choice');
+        assert.deepEqual(questions.mood.options, [{ name: 'calm', description: 'Settled.' }, { name: 'angry', description: 'Furious.' }]);
+        assert.equal(questions.danger.type, 'noul');
+        assert.deepEqual(questions.danger.levels, ['No.', 'Yes.']);
+    });
+
+    it('sends every description of a scale longer than five', () => {
+        const levels = Array.from({ length: 8 }, (_, position) => `level ${position}`);
+        assert.deepEqual(askFor(sensor({ levels })).a.levels, levels);
+    });
 });
 
 describe('grouping sensors into calls', () => {

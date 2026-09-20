@@ -1,5 +1,6 @@
 import { actionOf } from './actions.js';
-import { hashText } from './util.js';
+import { hasValue } from './sensor-types.js';
+import { hashText, isRecord } from './util.js';
 
 const KEY = 'jeved';
 
@@ -43,11 +44,20 @@ export function getScores(message) {
     return record;
 }
 
-export function writeScores(message, scores, hash = hashText(message.mes)) {
+export function writeScores(message, scores, hash = hashText(message.mes), confidence = {}) {
     const extra = ensureExtra(message);
     const current = getRecord(message);
-    const kept = current && current.hash === hash && current.scores ? current.scores : {};
-    extra[KEY] = { ...current, hash, scores: { ...kept, ...scores } };
+    const fresh = !!current && current.hash === hash;
+    const kept = fresh && current.scores ? current.scores : {};
+    const levels = fresh && isRecord(current.confidence) ? { ...current.confidence } : {};
+    for (const id of Object.keys(scores)) {
+        if (typeof confidence?.[id] === 'number' && Number.isFinite(confidence[id])) {
+            levels[id] = confidence[id];
+        } else {
+            delete levels[id];
+        }
+    }
+    extra[KEY] = { ...current, hash, scores: { ...kept, ...scores }, confidence: levels };
     return extra[KEY];
 }
 
@@ -70,39 +80,71 @@ export function narratorIndices(chat, { from = chat.length, limit = Infinity } =
     return found;
 }
 
-export function latestScores(chat, ids, before = chat.length) {
-    const found = {};
+function measuredPairs(message, sensors) {
+    const record = getScores(message);
+    if (!record || !isRecord(record.scores)) {
+        return { values: null, confidence: {} };
+    }
+    const values = {};
+    const confidence = {};
+    for (const [id, value] of Object.entries(record.scores)) {
+        if (!hasValue(sensors.find(sensor => sensor?.id === id) ?? null, value)) {
+            continue;
+        }
+        values[id] = value;
+        const level = record.confidence?.[id];
+        if (typeof level === 'number' && Number.isFinite(level)) {
+            confidence[id] = level;
+        }
+    }
+    return { values, confidence };
+}
+
+function latestPairs(chat, ids, before, sensors) {
+    const values = {};
+    const confidence = {};
     for (const index of narratorIndices(chat, { from: before })) {
-        const scores = getScores(chat[index])?.scores;
+        const pairs = measuredPairs(chat[index], sensors);
         for (const id of ids) {
-            if (found[id] === undefined && typeof scores?.[id] === 'number') {
-                found[id] = scores[id];
+            if (values[id] === undefined && pairs.values?.[id] !== undefined) {
+                values[id] = pairs.values[id];
+                if (pairs.confidence[id] !== undefined) {
+                    confidence[id] = pairs.confidence[id];
+                }
             }
         }
-        if (ids.every(id => found[id] !== undefined)) {
+        if (ids.every(id => values[id] !== undefined)) {
             break;
         }
     }
-    return found;
+    return { values, confidence };
 }
 
-export function getHistory(chat, count, carryForwardIds = []) {
+export function latestScores(chat, ids, before = chat.length, sensors = []) {
+    return latestPairs(chat, ids, before, sensors).values;
+}
+
+export function getHistory(chat, count, carryForwardIds = [], sensors = []) {
     const indices = narratorIndices(chat, { limit: count }).reverse();
     const history = indices.map(index => {
-        const own = getScores(chat[index])?.scores ?? null;
-        return { index, scores: own, own };
+        const pairs = measuredPairs(chat[index], sensors);
+        return { index, scores: pairs.values, own: pairs.values, confidence: pairs.confidence };
     });
     if (!carryForwardIds.length) {
         return history;
     }
-    const inherited = latestScores(chat, carryForwardIds, indices[0] ?? chat.length);
+    const inherited = latestPairs(chat, carryForwardIds, indices[0] ?? chat.length, sensors);
     for (const entry of history) {
         for (const id of carryForwardIds) {
             const value = entry.own?.[id];
-            if (typeof value === 'number') {
-                inherited[id] = value;
-            } else if (inherited[id] !== undefined) {
-                entry.scores = { ...entry.scores, [id]: inherited[id] };
+            if (value !== undefined) {
+                inherited.values[id] = value;
+                inherited.confidence[id] = entry.confidence[id];
+            } else if (inherited.values[id] !== undefined) {
+                entry.scores = { ...entry.scores, [id]: inherited.values[id] };
+                if (inherited.confidence[id] !== undefined) {
+                    entry.confidence = { ...entry.confidence, [id]: inherited.confidence[id] };
+                }
             }
         }
     }

@@ -13,7 +13,7 @@ export const SWIPE_BUSY_ERROR = 'swipeBusy';
 
 const ERROR_TEXT = {
     key: { text: 'Key rejected', next: 'Paste a new key and press Test.' },
-    credit: { text: 'No credit', next: 'Add credit to your OpenRouter account.' },
+    credit: { text: 'No credit', next: 'Add credit to your account with this host.' },
     timeout: { text: 'Timed out', next: 'Jeved measures again on the next reply.' },
     config: { text: 'Not set up', next: 'Check the endpoint and the key.' },
     [SCRIPT_ERROR]: { text: 'Script failed', next: 'Open the rule and fix its script.' },
@@ -27,6 +27,7 @@ const state = {
     lastErrorKind: '',
     lastDecision: null,
     sessionCost: 0,
+    sessionTokens: 0,
     forcedRule: '',
     rerolling: false,
     measuring: 0,
@@ -59,6 +60,7 @@ export const lastError = () => state.lastError;
 export const lastErrorKind = () => state.lastErrorKind;
 export const lastDecision = () => (state.lastDecision ? structuredClone(state.lastDecision) : null);
 export const sessionCost = () => state.sessionCost;
+export const sessionTokens = () => state.sessionTokens;
 export const forcedRule = () => state.forcedRule;
 export const isRerolling = () => state.rerolling;
 export const isMeasuring = () => state.measuring > 0;
@@ -69,6 +71,10 @@ export function setMeasuring(count) {
 
 export function addCost(amount) {
     state.sessionCost += Number(amount) || 0;
+}
+
+export function addTokens(count) {
+    state.sessionTokens += Number(count) || 0;
 }
 
 export function forceRule(id) {
@@ -186,7 +192,7 @@ export function status() {
         return { kind: 'config', text: 'No endpoint', next: 'Set an endpoint in Settings.' };
     }
     if (!settings.apiKey) {
-        return { kind: 'nokey', text: 'No API key', next: 'Paste an OpenRouter key and press Test.' };
+        return { kind: 'nokey', text: 'No API key', next: 'Paste the key for your host and press Test.' };
     }
     if (state.lastError) {
         const detail = ERROR_TEXT[state.lastErrorKind] ?? ERROR_TEXT.other;

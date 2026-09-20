@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { BUILT_IN } from '../src/defaults.js';
 import { hostStub } from './helpers/host.js';
-import { getPreset, getSettings, initSettings, normaliseSettings, saveSettings, schemaProblem } from '../src/settings.js';
+import { SCHEMA_VERSION } from '../src/presets.js';
+import { conditionHolds } from '../src/rules.js';
+import { getPreset, getSettings, initSettings, normalisePreset, normaliseSettings, saveSettings, schemaProblem } from '../src/settings.js';
 
 const preset = (overrides = {}) => ({ description: '', sensors: [], rules: [], gap: 8, maxNudges: 1, ...overrides });
 
@@ -60,7 +62,7 @@ describe('normaliseSettings', () => {
         assert.equal(rule.action, 'teleport');
         assert.equal(rule.enabled, false);
         assert.equal(rule.directive, 'd');
-        assert.deepEqual(rule.conditions, [{ sensor: 'a', op: 'below', value: 1 }]);
+        assert.deepEqual(rule.conditions, [{ sensor: 'a', op: 'below', value: 1, minConfidence: null }]);
     });
 
     it('leaves a rule with no action at all on the default action', () => {
@@ -80,6 +82,67 @@ describe('normaliseSettings', () => {
         });
         assert.equal(settings.presets.a.rules[0].conditions[0].value, 0);
         assert.equal(settings.presets.a.rules[0].skipWhen.value, 3);
+    });
+
+    it('keeps a choice condition instead of forcing it into a number', () => {
+        const normalised = normalisePreset({
+            description: '',
+            gap: 8,
+            maxNudges: 1,
+            sensors: [{ id: 'mood', type: 'choice', options: [{ name: 'calm', description: '' }, { name: 'angry', description: '' }] }],
+            rules: [{
+                id: 'r',
+                need: 1,
+                window: 1,
+                conditions: [{ sensor: 'mood', op: 'is_not', value: 'calm' }],
+                skipWhen: { sensor: 'mood', op: 'is', value: 'angry' },
+            }],
+        });
+        assert.deepEqual(normalised.rules[0].conditions[0], { sensor: 'mood', op: 'is_not', value: 'calm', minConfidence: null });
+        assert.deepEqual(normalised.rules[0].skipWhen, { sensor: 'mood', op: 'is', value: 'angry', minConfidence: null });
+    });
+
+    it('pulls a condition back to what its sensor type allows', () => {
+        const normalised = normalisePreset({
+            description: '',
+            gap: 8,
+            maxNudges: 1,
+            sensors: [
+                { id: 'mood', type: 'choice', options: [{ name: 'calm', description: '' }, { name: 'angry', description: '' }] },
+                { id: 'danger', type: 'noul', levels: ['no', 'yes'] },
+            ],
+            rules: [{
+                id: 'r',
+                need: 1,
+                window: 1,
+                conditions: [
+                    { sensor: 'mood', op: 'below', value: 2, minConfidence: 0.5 },
+                    { sensor: 'danger', op: 'above', value: 4, minConfidence: 0.5 },
+                ],
+            }],
+        });
+        const [mood, danger] = normalised.rules[0].conditions;
+        assert.deepEqual(mood, { sensor: 'mood', op: 'is', value: 'calm', minConfidence: 0.5 });
+        assert.deepEqual(danger, { sensor: 'danger', op: 'above', value: 1, minConfidence: null });
+    });
+
+    it('trims an option name and the condition that names it, so the two still match', () => {
+        const normalised = normalisePreset({
+            description: '',
+            gap: 8,
+            maxNudges: 1,
+            sensors: [{ id: 'mood', type: 'choice', options: [{ name: ' calm ', description: 'x' }, { name: 'angry', description: '' }] }],
+            rules: [{ id: 'r', need: 1, window: 1, conditions: [{ sensor: 'mood', op: 'is', value: ' calm ' }] }],
+        });
+        assert.deepEqual(normalised.sensors[0].options.map(option => option.name), ['calm', 'angry']);
+        assert.equal(normalised.rules[0].conditions[0].value, 'calm');
+        assert.equal(conditionHolds({ scores: { mood: 'calm' } }, normalised.rules[0].conditions[0]), true);
+    });
+
+    it('gives every sensor a type and an option list', () => {
+        const settings = normaliseSettings({ presets: { a: preset({ sensors: [{ id: 'a' }, { id: 'b', type: 'vibe' }] }) } });
+        assert.deepEqual(settings.presets.a.sensors.map(item => item.type), ['score', 'score']);
+        assert.deepEqual(settings.presets.a.sensors[0].options, []);
     });
 
     it('drops junk instead of throwing', () => {
@@ -205,14 +268,14 @@ describe('initSettings', () => {
         const counts = host(extensionSettings);
         const settings = initSettings();
         const [tone, pace] = settings.presets.Mine.sensors;
-        assert.equal(settings.schema, 2);
+        assert.equal(settings.schema, SCHEMA_VERSION);
         assert.equal(settings.instructionsCap, 48000);
         assert.deepEqual([tone.turns, tone.includeContext, tone.includeUser, tone.measureEvery], [4, true, false, 1]);
         assert.deepEqual([pace.turns, pace.includeContext, pace.includeUser, pace.measureEvery], [1, false, true, 1]);
         assert.equal(tone.question, 'Does `latest_turns` fit `context`?');
         assert.equal(settings.presets.Mine.contextGroups.persona, true);
         assert.equal(settings.presets.Mine.storyWindow, undefined);
-        assert.equal(settings.presets.Mine.jeved, 2);
+        assert.equal(settings.presets.Mine.jeved, SCHEMA_VERSION);
         assert.equal(counts.saveCount, 1);
 
         initSettings();
@@ -236,13 +299,13 @@ describe('initSettings', () => {
         const stored = initSettings().presets.Mine;
         assert.equal(stored.contextGroups.persona, false);
         assert.equal(stored.contextGroups.main_prompt, true);
-        assert.equal(stored.jeved, 2);
+        assert.equal(stored.jeved, SCHEMA_VERSION);
     });
 
     it('stamps every preset it hands back with the schema this build knows', () => {
         host({ jeved: { schema: 2, activePreset: 'Mine', presets: { Mine: { description: '', rules: [], sensors: [] } } } });
         const settings = initSettings();
-        assert.deepEqual(Object.values(settings.presets).map(item => item.jeved), [2]);
+        assert.deepEqual(Object.values(settings.presets).map(item => item.jeved), [SCHEMA_VERSION]);
     });
 
     it('reads the version off the presets when the file states none', () => {
@@ -260,7 +323,7 @@ describe('initSettings', () => {
         const counts = host(extensionSettings);
         const settings = initSettings();
         assert.equal(settings.presets.Mine.sensors[0].turns, 3);
-        assert.equal(settings.schema, 2);
+        assert.equal(settings.schema, SCHEMA_VERSION);
         assert.equal(counts.saveCount, 1);
     });
 });

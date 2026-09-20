@@ -1,33 +1,8 @@
-import { checkScript } from '../presets.js';
 import { toast } from '../toast.js';
 import { SCRIPT_ERROR, describeError, notify, setErrorText } from './status.js';
 
 const SCRIPT_LIMIT_MS = 5000;
 const TIMED_OUT = Symbol('timed out');
-
-function valueOf(value) {
-    if (value && Array.isArray(value.executorList)) {
-        return { closure: closureOf(value) };
-    }
-    const text = String(value ?? '');
-    return { text, macro: text.includes('{{') };
-}
-
-function stepOf(executor) {
-    return {
-        typed: String(executor?.name ?? ''),
-        name: String(executor?.command?.name ?? executor?.name ?? ''),
-        named: (executor?.namedArgumentList ?? []).map(arg => ({ name: String(arg?.name ?? ''), value: valueOf(arg?.value) })),
-        unnamed: (executor?.unnamedArgumentList ?? []).map(arg => valueOf(arg?.value)),
-    };
-}
-
-function closureOf(closure) {
-    return {
-        args: (closure?.argumentList ?? []).map(arg => ({ name: String(arg?.name ?? ''), value: valueOf(arg?.value) })),
-        steps: (closure?.executorList ?? []).map(stepOf),
-    };
-}
 
 export function scriptParser() {
     const Parser = SillyTavern.getContext()?.SlashCommandParser;
@@ -35,18 +10,12 @@ export function scriptParser() {
         return null;
     }
     return text => {
-        const parser = new Parser();
-        let closure = null;
         try {
-            closure = parser.parse(text, true);
+            new Parser().parse(text, true);
+            return '';
         } catch (error) {
-            return { error: error?.message || 'the script could not be read' };
+            return error?.message || 'the script could not be read';
         }
-        return {
-            error: '',
-            commands: (parser.commandIndex ?? []).map(stepOf),
-            ...closureOf(closure),
-        };
     };
 }
 
@@ -61,11 +30,6 @@ export async function runScript(rule) {
         return;
     }
     const label = rule.label || rule.id;
-    const problem = checkScript(script, scriptParser());
-    if (problem) {
-        failed(label, `didn't run. ${problem}`);
-        return;
-    }
     let timer = null;
     try {
         const running = SillyTavern.getContext().executeSlashCommandsWithOptions(script, {

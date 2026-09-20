@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { badgeFor, bandText, conditionShort, conditionText, decisionSentence, excerpt, gaugeFor, levelText, ordinal, previewSentence, questionKeysHint, readsSummary, readsTag, rescanSentence, ruleBrief, ruleProblem, ruleSummary, scoreLine, sensorLabel, sensorProblem, stripChart, tokenWords } from '../src/describe.js';
+import { badgeFor, bandText, decisionSentence, excerpt, levelText, listPhrase, previewSentence, questionKeysHint, readsTag, rescanSentence, ruleBrief, ruleProblem, ruleSummary, scoreLine, sensorProblem, stripChart, tokenWords } from '../src/describe.js';
+import { conditionShort, conditionText, sensorLabel, valueText } from '../src/sensor-types.js';
 import { scoreText } from '../src/util.js';
 
 const sensors = [
@@ -8,6 +9,13 @@ const sensors = [
     { id: 'tension', label: 'Tension', turns: 1, includeUser: true, levels: ['None.', 'Mild.', 'Clear.', 'High.', 'Extreme.'] },
     { id: 'bare', label: '', turns: 1, levels: [] },
 ];
+
+const typed = [
+    { id: 'mood', label: 'Mood', type: 'choice', options: [{ name: 'calm', description: 'Settled.' }, { name: 'angry', description: 'Furious.' }] },
+    { id: 'danger', label: 'Danger', type: 'noul', levels: ['Nobody is.', 'Someone is.'] },
+    { id: 'plain', label: 'Plain', type: 'noul', levels: [] },
+];
+
 
 function rule(overrides = {}) {
     return {
@@ -56,38 +64,41 @@ describe('words for one value', () => {
         assert.equal(readsTag({}), '1 reply');
     });
 
-    it('says what Jev sees in one sentence, with both numbers in it', () => {
-        assert.equal(
-            readsSummary({ turns: 2, measureEvery: 5, includeUser: true, includeContext: true }),
-            'Every 5th reply, Jev reads the last 2 replies with your messages, plus context',
-        );
-        assert.equal(readsSummary({ turns: 1, measureEvery: 1, includeUser: true }), 'On every reply, Jev reads the last reply and your message before it');
-        assert.equal(readsSummary({ turns: 1, measureEvery: 1 }), 'On every reply, Jev reads the last reply');
-        assert.equal(readsSummary({ turns: 5, measureEvery: 2, includeContext: true }), 'Every 2nd reply, Jev reads the last 5 replies, without your messages, plus context');
-        assert.equal(readsSummary({ turns: 3, measureEvery: 3, includeUser: true }), 'Every 3rd reply, Jev reads the last 3 replies with your messages');
-    });
-
-    it('counts with the right ordinal', () => {
-        assert.deepEqual([1, 2, 3, 4, 11, 12, 13, 21, 22, 101].map(ordinal), ['1st', '2nd', '3rd', '4th', '11th', '12th', '13th', '21st', '22nd', '101st']);
-    });
-
-    it('names the keys the current settings produce', () => {
-        assert.equal(questionKeysHint({ turns: 1, includeUser: true }), 'Refer to the reply as `latest_turn` and your message as `player_message`.');
+    it('names only the keys the current settings produce', () => {
         assert.equal(questionKeysHint({ turns: 1 }), 'Refer to the reply as `latest_turn`.');
         assert.equal(
-            questionKeysHint({ turns: 4, includeContext: true }),
-            'Refer to the replies as `latest_turns`. The card and the prompts are in `context`.',
+            questionKeysHint({ turns: 1, includeUser: true }),
+            'Refer to the reply as `latest_turn` and your message as `player_message`.',
+        );
+        assert.equal(
+            questionKeysHint({ turns: 1, includeUser: true, includeContext: true }),
+            'Refer to the reply as `latest_turn`, your message as `player_message`, and the card and prompts as `context`.',
+        );
+    });
+
+    it('never names your message when Jev reads several replies at once', () => {
+        assert.equal(questionKeysHint({ turns: 4, includeUser: true }), 'Refer to the replies as `latest_turns`.');
+        assert.equal(
+            questionKeysHint({ turns: 4, includeUser: true, includeContext: true }),
+            'Refer to the replies as `latest_turns` and the card and prompts as `context`.',
         );
     });
 
     it('rounds a token count into words', () => {
-        assert.equal(tokenWords(3600), 'about 3,600 tokens');
-        assert.equal(tokenWords(0), 'about 0 tokens');
+        assert.equal(tokenWords(3600), 'About 3,600 tokens');
+        assert.equal(tokenWords(0), 'About 0 tokens');
     });
 
     it('cuts an excerpt and flattens its whitespace', () => {
         assert.equal(excerpt('a\n\n  b'), 'a b');
         assert.equal(excerpt('abcdef', 3), 'abc...');
+    });
+
+    it('joins a list with and, and keeps the comma before it from three items on', () => {
+        assert.equal(listPhrase(['one']), 'one');
+        assert.equal(listPhrase(['one', 'two']), 'one and two');
+        assert.equal(listPhrase(['one', 'two', 'three']), 'one, two, and three');
+        assert.equal(listPhrase([]), '');
     });
 
     it('writes one condition in plain words', () => {
@@ -100,6 +111,61 @@ describe('words for one value', () => {
         assert.equal(conditionShort({ sensor: 'tone', op: 'below', value: 1.5 }, sensors), 'Tone below 1.5');
         assert.equal(conditionShort({ sensor: 'tension', op: 'above', value: 2 }, sensors), 'Tension above 2');
         assert.equal(conditionShort(null, sensors), '');
+    });
+});
+
+describe('words for a sensor of each type', () => {
+    it('writes the value the way its type reads', () => {
+        assert.equal(valueText(sensors[1], 2.44), '2.4');
+        assert.equal(valueText(typed[0], 'calm'), 'calm');
+        assert.equal(valueText(typed[1], 0.716), '72%');
+        assert.equal(valueText(typed[1], 0), '0%');
+    });
+
+    it('says not measured for a value its type cannot read', () => {
+        assert.equal(valueText(typed[0], null), 'not measured');
+        assert.equal(valueText(typed[1], null), 'not measured');
+        assert.equal(valueText(typed[1], 'calm'), 'not measured');
+        assert.equal(valueText(typed[0], 2, ''), '');
+    });
+
+    it('gives the words that go with the value', () => {
+        assert.equal(levelText(typed[0], 'angry'), 'Furious.');
+        assert.equal(levelText(typed[0], 'gone'), '');
+        assert.equal(levelText(typed[1], 0.8), 'Someone is.');
+        assert.equal(levelText(typed[1], 0.2), 'Nobody is.');
+        assert.equal(levelText(typed[2], 0.8), 'Yes');
+        assert.equal(levelText(typed[2], 0.2), 'No');
+    });
+
+    it('writes a score line for each type', () => {
+        assert.equal(scoreLine(typed[0], 'calm', { words: 'Settled.' }), 'Mood: calm - Settled.');
+        assert.equal(scoreLine(typed[1], 0.9, { words: 'Someone is.' }), 'Danger: 90% - Someone is.');
+    });
+
+    it('bands a threshold only where a band means something', () => {
+        assert.equal(bandText(typed[1], 0.6), 'Someone is.');
+        assert.equal(bandText(typed[1], 0.4), 'Nobody is.');
+        assert.equal(bandText(typed[0], 'calm'), '');
+    });
+
+    it('writes a condition sentence that fits the sensor type', () => {
+        assert.equal(conditionText({ sensor: 'mood', op: 'is', value: 'calm' }, typed), 'Mood is calm');
+        assert.equal(conditionText({ sensor: 'mood', op: 'is_not', value: 'calm' }, typed), 'Mood is not calm');
+        assert.equal(conditionText({ sensor: 'danger', op: 'above', value: 0.6 }, typed), 'Danger is above 60%');
+    });
+
+    it('names the least confidence when a condition asks for one', () => {
+        assert.equal(
+            conditionText({ sensor: 'mood', op: 'is', value: 'calm', minConfidence: 0.7 }, typed),
+            'Mood is calm with at least 70% confidence',
+        );
+        assert.equal(conditionText({ sensor: 'mood', op: 'is', value: 'calm', minConfidence: null }, typed), 'Mood is calm');
+    });
+
+    it('shortens a condition of each type for a row', () => {
+        assert.equal(conditionShort({ sensor: 'mood', op: 'is_not', value: 'angry' }, typed), 'Mood is not angry');
+        assert.equal(conditionShort({ sensor: 'danger', op: 'below', value: 0.25 }, typed), 'Danger below 25%');
     });
 });
 
@@ -234,39 +300,6 @@ describe('bandText', () => {
     });
 });
 
-describe('gaugeFor', () => {
-    const history = [{ index: 0, scores: { tone: 3 } }, { index: 1, scores: { tone: 1, tension: 4 } }];
-
-    it('reads the threshold and the latest score of the first condition', () => {
-        const gauge = gaugeFor(rule(), history);
-        assert.deepEqual(gauge, { value: 1, threshold: 1.5, op: 'below', matching: true });
-    });
-
-    it('is not matching when the latest reply is on the other side', () => {
-        const gauge = gaugeFor(rule({ conditions: [{ sensor: 'tone', op: 'above', value: 1.5 }] }), history);
-        assert.deepEqual(gauge, { value: 1, threshold: 1.5, op: 'above', matching: false });
-    });
-
-    it('needs every condition to hold before it accents the dot', () => {
-        const both = rule({ conditions: [
-            { sensor: 'tone', op: 'below', value: 1.5 },
-            { sensor: 'tension', op: 'below', value: 2 },
-        ] });
-        assert.equal(gaugeFor(both, history).matching, false);
-        assert.equal(gaugeFor(both, history).value, 1);
-    });
-
-    it('has no value when the latest reply is not measured', () => {
-        assert.equal(gaugeFor(rule(), [{ index: 0, scores: null }]).value, null);
-        assert.equal(gaugeFor(rule(), []).value, null);
-    });
-
-    it('falls back to a flat gauge when the rule has no condition', () => {
-        assert.deepEqual(gaugeFor(rule({ conditions: [] }), history), { value: null, threshold: 0, op: 'below', matching: false });
-        assert.deepEqual(gaugeFor(null, history), { value: null, threshold: 0, op: 'below', matching: false });
-    });
-});
-
 describe('stripChart', () => {
     const columns = [
         { index: 2, scores: { tone: 1, tension: 3 }, own: { tone: 1, tension: 3 } },
@@ -290,8 +323,30 @@ describe('stripChart', () => {
 
     it('takes a tick from every enabled rule that names the sensor', () => {
         const chart = stripChart({ columns, sensors, rules });
-        assert.deepEqual(chart.rows[0].ticks, [{ rule: 'flat', op: 'below', value: 1.5 }]);
+        assert.deepEqual(chart.rows[0].ticks, [{ rule: 'flat', condition: { sensor: 'tone', op: 'below', value: 1.5 } }]);
         assert.deepEqual(chart.rows[1].ticks, []);
+    });
+
+    it('accents a choice cell only where the tick matches it', () => {
+        const picked = [
+            { index: 2, scores: { mood: 'calm' }, own: { mood: 'calm' } },
+            { index: 4, scores: { mood: 'angry' }, own: { mood: 'angry' } },
+        ];
+        const watch = [rule({ conditions: [{ sensor: 'mood', op: 'is', value: 'angry' }] })];
+        const [row] = stripChart({ columns: picked, sensors: typed, rules: watch }).rows;
+        assert.deepEqual(row.cells.map(cell => cell.matching), [false, true]);
+        assert.deepEqual(row.cells.map(cell => cell.value), ['calm', 'angry']);
+        assert.deepEqual(row.cells.map(cell => cell.carried), [false, false]);
+    });
+
+    it('does not accent a cell whose confidence is below what the tick asks for', () => {
+        const picked = [
+            { index: 2, scores: { tone: 1 }, own: { tone: 1 }, confidence: { tone: 0.9 } },
+            { index: 4, scores: { tone: 1 }, own: { tone: 1 }, confidence: {} },
+        ];
+        const sure = [rule({ conditions: [{ sensor: 'tone', op: 'below', value: 1.5, minConfidence: 0.8 }] })];
+        const [row] = stripChart({ columns: picked, sensors, rules: sure }).rows;
+        assert.deepEqual(row.cells.map(cell => cell.matching), [true, false]);
     });
 
     it('accents the cells that satisfy a tick', () => {
@@ -378,6 +433,27 @@ describe('ruleSummary', () => {
 
     it('waits one reply in the singular', () => {
         assert.match(ruleSummary(rule({ cooldown: 1 }), sensors), /waits 1 reply before/);
+    });
+
+    it('states a choice rule and a yes or no rule in the same shape', () => {
+        const picked = rule({
+            need: 1,
+            window: 1,
+            conditions: [{ sensor: 'mood', op: 'is_not', value: 'calm' }],
+            skipWhen: { sensor: 'danger', op: 'above', value: 0.8 },
+        });
+        assert.equal(
+            ruleSummary(picked, typed),
+            'When Mood is not calm on the latest reply, except when Danger is above 80% on the latest reply, nudge the next turn.',
+        );
+    });
+
+    it('names the least confidence inside the rule sentence', () => {
+        const sure = rule({ need: 1, window: 1, conditions: [{ sensor: 'mood', op: 'is', value: 'angry', minConfidence: 0.6 }] });
+        assert.equal(
+            ruleSummary(sure, typed),
+            'When Mood is angry with at least 60% confidence on the latest reply, nudge the next turn.',
+        );
     });
 });
 

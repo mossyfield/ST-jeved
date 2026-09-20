@@ -1,27 +1,75 @@
 import { blankSensor } from '../defaults.js';
-import { excerpt, questionKeysHint, readsSummary, readsTag, rescanSentence, sensorLabel, sensorProblem, tokenWords } from '../describe.js';
+import { excerpt, listPhrase, questionKeysHint, readsTag, rescanSentence, sensorProblem, tokenWords } from '../describe.js';
 import { describeError, measureBlockReason, planMeasurement, rescan, testSensor } from '../engine.js';
 import { buildContext, countTokens } from '../instructions.js';
-import { LEVEL_COUNT, TURNS } from '../limits.js';
-import { legacyReference, slugId, validatePreset } from '../presets.js';
+import { LEVELS, OPTIONS, TURNS } from '../limits.js';
+import { legacyReference, renameOption, slugId, validatePreset } from '../presets.js';
+import { CHOICE, NOUL, SENSOR_TYPES, sensorLabel, typeOf, valueText } from '../sensor-types.js';
 import { buildRequest, groupKeyOf, groupSensors } from '../sensors.js';
 import { getPreset, getSettings, normalisePreset, saveSettings } from '../settings.js';
 import { currentChat, isNarrator, latestScores, narratorIndices } from '../store.js';
 import { toast } from '../toast.js';
-import { replyWord, scoreText } from '../util.js';
-import { actions, area, busy, button, checkbox, clampNumber, column, detach, field, formRow, help, node, note, resultsBox, row, section, setLabel, text, toggle, toolbar, withReason } from './dom.js';
+import { isRecord, replyWord } from '../util.js';
+import { actions, area, busy, button, checkbox, clampNumber, column, detach, field, formRow, help, iconButton, node, note, resultsBox, row, section, segmented, setLabel, text, toggle, toolbar, withReason } from './dom.js';
 import { ask } from './dialogs.js';
 import { masterDetail } from './master.js';
 
 const TEST_REPLIES = 10;
 const CROWDED = 30000;
 const READS_DELAY = 250;
+const SPREAD_ALL = 10;
+const SPREAD_TOP = 5;
 const NO_REPLIES = 'This chat has no replies to test yet.';
-const ASK_ABOUT = 'Ask about one thing that the text shows.';
 
-function usedBy(preset, id) {
+const TYPE_OPTIONS = SENSOR_TYPES.map(type => ({ value: type.id, label: type.label }));
+
+function usedBy(preset, id, match = () => true) {
     return preset.rules.filter(rule => [...rule.conditions, rule.skipWhen]
-        .some(condition => condition?.sensor === id));
+        .some(condition => condition?.sensor === id && match(condition)));
+}
+
+function ruleNames(rules) {
+    return rules.map(rule => rule.label || rule.id).join(', ');
+}
+
+export function optionNames(sensor) {
+    return new Map((sensor?.options ?? []).map(option => [option, String(option.name ?? '').trim()]));
+}
+
+export function optionChanges(before, draft) {
+    const renames = new Map();
+    const kept = new Set();
+    for (const option of draft?.options ?? []) {
+        const was = before.get(option);
+        if (was === undefined) {
+            continue;
+        }
+        kept.add(was);
+        const now = String(option.name ?? '').trim();
+        if (was && now && now !== was) {
+            renames.set(was, now);
+        }
+    }
+    const removed = [...new Set(before.values())].filter(name => name && !kept.has(name));
+    return { renames, removed };
+}
+
+export function changeProblems(preset, saved, candidate, changes) {
+    const used = usedBy(preset, saved.id);
+    if (!used.length) {
+        return [];
+    }
+    const problems = [];
+    if (typeOf(candidate).id !== typeOf(saved).id) {
+        problems.push(`This sensor is used by ${ruleNames(used)}, so its type can't change. Change those rules first.`);
+    }
+    for (const name of changes.removed) {
+        const holders = usedBy(preset, saved.id, condition => condition.value === name);
+        if (holders.length) {
+            problems.push(`The option ${name} is used by ${ruleNames(holders)}. Change those rules first.`);
+        }
+    }
+    return problems;
 }
 
 function narratorCount() {
@@ -40,11 +88,40 @@ function sensorProblems(candidate) {
         .map(sensorProblem);
 }
 
+export function spreadText(probabilities) {
+    if (!isRecord(probabilities)) {
+        return '';
+    }
+    const shares = Object.entries(probabilities)
+        .filter(([, share]) => typeof share === 'number' && Number.isFinite(share))
+        .sort((one, other) => other[1] - one[1]);
+    const shown = shares.length > SPREAD_ALL ? shares.slice(0, SPREAD_TOP) : shares;
+    const words = shown.map(([name, share]) => `${name} ${Math.round(share * 100)}%`).join(', ');
+    const rest = shares.length - shown.length;
+    return rest ? `${words} and ${rest} more` : words;
+}
+
+function testNote(row) {
+    const parts = [];
+    if (typeof row.confidence === 'number') {
+        parts.push(`${Math.round(row.confidence * 100)}% confident`);
+    }
+    const spread = spreadText(row.probabilities);
+    if (spread) {
+        parts.push(spread);
+    }
+    return parts.join(' · ');
+}
+
 function testBlock(draft, takenIds, api) {
     const count = () => Math.min(TEST_REPLIES, narratorCount());
     const caption = () => (count() ? `Test on last ${count()} replies (${count()} API calls)` : 'Test');
-    const scored = rows => rows.filter(row => !row.error)
-        .map(row => ({ index: row.index, tag: scoreText(row.score), text: excerpt(row.text) }));
+    const scored = rows => rows.filter(row => !row.error).map(row => ({
+        index: row.index,
+        tag: valueText(draft, row.value, ''),
+        note: testNote(row),
+        text: excerpt(row.text),
+    }));
     const box = resultsBox();
     const hint = note('');
     let controller = null;
@@ -74,12 +151,12 @@ function testBlock(draft, takenIds, api) {
                 },
             );
             const rows = scored(collected);
-            box.show(`Scores for the last ${replyWord(rows.length)}`, rows, 'Nothing was measured.');
+            box.show(`Answers for the last ${replyWord(rows.length)}`, rows, 'Nothing was measured.');
             const failed = collected.find(row => row.error);
             if (failed) {
                 box.warn(failed.error);
             }
-            box.foot("These scores aren't saved.");
+            box.foot("These answers aren't saved.");
         } catch (error) {
             box.fail(describeError(error));
         } finally {
@@ -100,10 +177,6 @@ function testBlock(draft, takenIds, api) {
     api.onRefresh(paint);
     api.onClose(() => controller?.abort());
     return section('Test', toolbar(run, hint), box.element);
-}
-
-function listWords(items) {
-    return items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`;
 }
 
 async function requestTokens(draft, preset) {
@@ -139,27 +212,125 @@ function readsBlock(preset, draft, saved, api) {
             .filter(sensor => sensor.id !== saved?.id)
             .map(sensor => sensorLabel(preset.sensors, sensor.id));
         const tokens = await requestTokens(draft, preset);
-        const parts = [`${readsSummary(draft)}${tokens === null ? '' : ` (${tokenWords(tokens)})`}.`];
+        const parts = [];
+        if (tokens !== null) {
+            parts.push(`${tokenWords(tokens)}.`);
+        }
         if (others.length) {
-            parts.push(`Shares a call with ${listWords(others)}.`);
+            parts.push(`Shares a call with ${listPhrase(others)}.`);
         }
         line.textContent = parts.join(' ');
         crowded.hidden = tokens === null || tokens <= CROWDED;
-        crowded.textContent = crowded.hidden ? '' : "That is close to Jev's 32,000 token limit, so the call may return no scores.";
+        crowded.textContent = crowded.hidden ? '' : "That is close to Jev's 32,000 token limit, so the call may return no answers.";
     }
 
     const schedule = SillyTavern.libs.lodash.debounce(() => detach(paint()), READS_DELAY);
     api.onClose(() => schedule.cancel());
     detach(paint());
-    return { element: formRow('What Jev sees', column('', line, crowded)), schedule };
+    return { element: formRow('Call size', column('', line, crowded)), schedule };
+}
+
+function levelRows(draft, redraw, onChange) {
+    return draft.levels.map((level, position) => row(
+        text('span', 'jeved-scale-badge', String(position)),
+        area(level, '', 2, value => {
+            draft.levels[position] = value;
+            onChange();
+        }),
+        draft.levels.length > LEVELS.min
+            ? iconButton('fa-xmark', 'Remove this score', () => {
+                draft.levels.splice(position, 1);
+                redraw();
+                onChange();
+            })
+            : null,
+    ));
+}
+
+function optionRows(draft, redraw, onChange) {
+    return draft.options.map((option, position) => row(
+        field('text', option.name, 'calm', value => {
+            option.name = value;
+            onChange();
+        }),
+        area(option.description, 'When the reply fits this option.', 2, value => {
+            option.description = value;
+            onChange();
+        }),
+        draft.options.length > OPTIONS.min
+            ? iconButton('fa-xmark', 'Remove this option', () => {
+                draft.options.splice(position, 1);
+                redraw();
+                onChange();
+            })
+            : null,
+    ));
+}
+
+function answerRows(draft, onChange) {
+    return ['No', 'Yes'].map((word, position) => row(
+        text('span', 'jeved-scale-word', word),
+        area(draft.levels[position] ?? '', '', 2, value => {
+            draft.levels[position] = value;
+            onChange();
+        }),
+    ));
+}
+
+function seedScale(draft) {
+    if (typeOf(draft).id === CHOICE) {
+        while (draft.options.length < OPTIONS.min) {
+            draft.options.push({ name: '', description: '' });
+        }
+        return;
+    }
+    while (draft.levels.length < LEVELS.min) {
+        draft.levels.push('');
+    }
+}
+
+function scaleBlock(draft, onChange) {
+    const block = node('div', 'jeved-scale-block');
+    const draw = () => {
+        seedScale(draft);
+        const type = typeOf(draft);
+        const scale = column('jeved-scale');
+        const children = [scale];
+        if (type.id === CHOICE) {
+            scale.append(...optionRows(draft, draw, onChange));
+            if (draft.options.length < OPTIONS.max) {
+                children.push(actions(button('Add option', 'Add another option', () => {
+                    draft.options.push({ name: '', description: '' });
+                    draw();
+                    onChange();
+                }, { icon: 'fa-plus' })));
+            }
+        } else if (type.id === NOUL) {
+            scale.append(...answerRows(draft, onChange));
+        } else {
+            scale.append(...levelRows(draft, draw, onChange));
+            if (draft.levels.length < LEVELS.max) {
+                children.push(actions(button('Add score', 'Add another score description', () => {
+                    draft.levels.push('');
+                    draw();
+                    onChange();
+                }, { icon: 'fa-plus' })));
+            }
+        }
+        block.replaceChildren(section(type.scaleTitle, ...children));
+    };
+    draw();
+    return { element: block, draw };
 }
 
 function sensorPane(preset, draft, api, host, { saved, otherIds }) {
-    const questionHint = help(`${questionKeysHint(draft)} ${ASK_ABOUT}`);
+    const questionHint = help(questionKeysHint(draft));
     questionHint.id = 'jeved_sensor_hint';
     const wording = help('');
     wording.id = 'jeved_sensor_wording';
     const reads = readsBlock(preset, draft, saved, api);
+    const askRow = node('div', 'jeved-ask-row');
+    const typeAbout = help(typeOf(draft).about);
 
     const paintWording = () => {
         const found = legacyReference(draft);
@@ -167,22 +338,23 @@ function sensorPane(preset, draft, api, host, { saved, otherIds }) {
         wording.hidden = !found;
     };
     const touch = () => {
-        questionHint.textContent = `${questionKeysHint(draft)} ${ASK_ABOUT}`;
+        questionHint.textContent = questionKeysHint(draft);
         reads.schedule();
         api.markDirty();
     };
 
-    const scale = column('jeved-scale');
-    for (let position = 0; position < LEVEL_COUNT; position++) {
-        scale.append(row(
-            text('span', 'jeved-scale-badge', String(position)),
-            area(draft.levels[position], '', 2, value => {
-                draft.levels[position] = value;
-                paintWording();
-                api.markDirty();
-            }),
-        ));
-    }
+    const scale = scaleBlock(draft, () => {
+        paintWording();
+        api.markDirty();
+    });
+    const typeControl = segmented(TYPE_OPTIONS, typeOf(draft).id, value => {
+        draft.type = value;
+        typeAbout.textContent = typeOf(draft).about;
+        drawAsk();
+        scale.draw();
+        api.markDirty();
+    });
+    typeControl.id = 'jeved_sensor_type';
 
     const turnsField = field('number', draft.turns, '', value => { draft.turns = value; touch(); }, {
         min: TURNS.min, max: TURNS.max, step: '1', clamp: value => clampNumber(value, TURNS.min, TURNS.max),
@@ -203,12 +375,17 @@ function sensorPane(preset, draft, api, host, { saved, otherIds }) {
     });
     userToggle.id = 'jeved_sensor_user';
 
-    const questionField = area(draft.question, 'How much tension or pressure is in `latest_turn`?', 3, value => {
-        draft.question = value;
-        paintWording();
-        api.markDirty();
-    });
-    questionField.id = 'jeved_sensor_question';
+    function drawAsk() {
+        const type = typeOf(draft);
+        const questionField = area(draft.question, type.askPlaceholder, 3, value => {
+            draft.question = value;
+            paintWording();
+            api.markDirty();
+        });
+        questionField.id = 'jeved_sensor_question';
+        askRow.replaceChildren(formRow(type.askTitle, column('', questionField, questionHint, wording)));
+    }
+    drawAsk();
     paintWording();
 
     const watchToggle = toggle(draft.watch, 'Measure this sensor when no rule uses it', value => {
@@ -224,6 +401,7 @@ function sensorPane(preset, draft, api, host, { saved, otherIds }) {
     return column(
         'jeved-form',
         formRow('Name', field('text', draft.label, 'Tension', value => { draft.label = value; api.markDirty(); })),
+        formRow('Type', column('', typeControl, typeAbout)),
         column(
             'jeved-field-grid',
             formRow('History (replies)', turnsField),
@@ -232,12 +410,12 @@ function sensorPane(preset, draft, api, host, { saved, otherIds }) {
             formRow('Include my messages', userToggle),
         ),
         reads.element,
-        formRow('Question', column('', questionField, questionHint, wording)),
-        section('Scale', help('0 means none, and 4 means the most possible.'), scale),
+        askRow,
+        scale.element,
         formRow(
             'Measure anyway',
             watchToggle,
-            'Measure this sensor even when no rule uses it, so its scores show in Activity.',
+            'Measure this sensor even when no rule uses it, so its answers show in Activity.',
         ),
         testBlock(draft, otherIds, api),
         actions(button('Delete sensor', 'Delete this sensor', async () => {
@@ -265,25 +443,29 @@ function sensorPane(preset, draft, api, host, { saved, otherIds }) {
 
 export function sensorsTab(host) {
     let preset = getPreset();
+    let openNames = new Map();
 
     const controller = masterDetail({
         newLabel: 'New sensor',
-        caption: 'Measured 0 to 4',
+        caption: '',
         emptyText: 'No sensors yet.',
         pickText: 'Pick a sensor, or add one.',
         items: () => preset.sensors,
         identity: () => preset,
         blankDraft: () => ({ ...blankSensor(''), watch: true }),
         draftOf: item => structuredClone(item),
-        beforeRows: () => latestScores(currentChat(), preset.sensors.map(sensor => sensor.id)),
+        beforeRows: () => {
+            const chat = currentChat();
+            return latestScores(chat, preset.sensors.map(sensor => sensor.id), chat.length, preset.sensors);
+        },
         rowOf: (sensor, index, api, latest) => {
             const line = node('div', 'jeved-sensor-row');
             const used = usedBy(preset, sensor.id).filter(rule => rule.enabled);
-            const names = used.map(rule => rule.label || rule.id).join(', ');
+            const names = ruleNames(used);
             line.append(
                 text('span', 'jeved-sensor-name', sensorLabel(preset.sensors, sensor.id)),
-                text('span', 'jeved-sensor-score', scoreText(latest[sensor.id], '')),
-                text('span', 'jeved-sensor-note', `${readsTag(sensor)} · ${names ? `Used by: ${names}` : 'Unused'}`),
+                text('span', 'jeved-sensor-score', valueText(sensor, latest[sensor.id], '')),
+                text('span', 'jeved-sensor-note', `${typeOf(sensor).caption(sensor)} · ${readsTag(sensor)} · ${names ? `Used by: ${names}` : 'Unused'}`),
             );
             if (!used.length) {
                 const watch = checkbox('Measure anyway', sensor.watch, value => {
@@ -296,15 +478,24 @@ export function sensorsTab(host) {
             }
             return line;
         },
-        paneOf: (draft, api, selected) => sensorPane(preset, draft, api, host, selected),
+        paneOf: (draft, api, selected) => {
+            openNames = optionNames(draft);
+            return sensorPane(preset, draft, api, host, selected);
+        },
         save: (draft, { index, otherIds }) => {
             const candidate = candidateSensor(draft, otherIds);
-            const problems = sensorProblems(candidate);
+            const saved = index >= 0 ? preset.sensors[index] : null;
+            const changes = optionChanges(openNames, draft);
+            const problems = [
+                ...sensorProblems(candidate),
+                ...(saved ? changeProblems(preset, saved, candidate, changes) : []),
+            ];
             if (problems.length) {
                 return { problems, id: '' };
             }
-            if (index >= 0) {
-                Object.assign(preset.sensors[index], draft);
+            if (saved) {
+                renameOption(preset.rules, saved.id, changes.renames);
+                Object.assign(saved, candidate);
             } else {
                 preset.sensors.push(candidate);
             }
@@ -338,7 +529,7 @@ export function sensorsTab(host) {
                 api.setNotice(null);
                 return host.newRuleFrom(id);
             }));
-            bar.append(note('Earlier replies have no scores until you measure them.'));
+            bar.append(note('Earlier replies have no answers until you measure them.'));
             api.setNotice(bar);
         },
     });

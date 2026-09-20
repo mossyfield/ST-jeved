@@ -1,67 +1,42 @@
 import { DEFAULT_ACTION, replacesReply, ruleAction } from './actions.js';
 import { TURNS } from './limits.js';
 import { conditionHolds, missingSensors, scoreOf } from './rules.js';
+import { conditionShort, conditionText, sensorLabel, typeOf, valueText } from './sensor-types.js';
 import { fired, isNarrator, lastUserIndex } from './store.js';
-import { clamp, replyWord, scoreText } from './util.js';
+import { clamp, replyWord } from './util.js';
 
 const turnsIn = sensor => clamp(sensor?.turns, TURNS);
-
-const SUFFIXES = ['th', 'st', 'nd', 'rd'];
-
-export function ordinal(count) {
-    const number = Math.max(0, Math.trunc(Number(count) || 0));
-    const tens = number % 100;
-    const suffix = tens >= 11 && tens <= 13 ? 'th' : SUFFIXES[number % 10] ?? 'th';
-    return `${number}${suffix}`;
-}
 
 export function readsTag(sensor) {
     const base = replyWord(turnsIn(sensor));
     return sensor?.includeContext ? `${base} + context` : base;
 }
 
-export function readsSummary(sensor) {
-    const turns = turnsIn(sensor);
-    const every = clamp(sensor?.measureEvery, TURNS);
-    const when = every === 1 ? 'On every reply' : `Every ${ordinal(every)} reply`;
-    let base = '';
-    if (turns === 1) {
-        base = sensor?.includeUser ? 'the last reply and your message before it' : 'the last reply';
-    } else {
-        base = sensor?.includeUser
-            ? `the last ${turns} replies with your messages`
-            : `the last ${turns} replies, without your messages`;
+export function listPhrase(items) {
+    if (items.length < 3) {
+        return items.join(' and ');
     }
-    return `${when}, Jev reads ${base}${sensor?.includeContext ? ', plus context' : ''}`;
+    return `${items.slice(0, -1).join(', ')}, and ${items.at(-1)}`;
 }
 
 export function questionKeysHint(sensor) {
     const turns = turnsIn(sensor);
-    let line = '';
-    if (turns === 1) {
-        line = sensor?.includeUser
-            ? 'Refer to the reply as `latest_turn` and your message as `player_message`.'
-            : 'Refer to the reply as `latest_turn`.';
-    } else {
-        line = 'Refer to the replies as `latest_turns`.';
+    const keys = [turns === 1 ? 'the reply as `latest_turn`' : 'the replies as `latest_turns`'];
+    if (turns === 1 && sensor?.includeUser) {
+        keys.push('your message as `player_message`');
     }
-    return sensor?.includeContext ? `${line} The card and the prompts are in \`context\`.` : line;
+    if (sensor?.includeContext) {
+        keys.push('the card and prompts as `context`');
+    }
+    return `Refer to ${listPhrase(keys)}.`;
 }
 
 export function tokenWords(count) {
-    return `about ${Number(count).toLocaleString('en-US')} tokens`;
-}
-
-export function findSensor(sensors, id) {
-    return (sensors ?? []).find(sensor => sensor?.id === id) ?? null;
+    return `About ${Number(count).toLocaleString('en-US')} tokens`;
 }
 
 function labelOf(item, id) {
     return String(item?.label ?? '').trim() || String(id ?? '');
-}
-
-export function sensorLabel(sensors, id) {
-    return labelOf(findSensor(sensors, id), id);
 }
 
 export function ruleLabel(rules, id) {
@@ -69,50 +44,16 @@ export function ruleLabel(rules, id) {
 }
 
 export function levelText(sensor, value) {
-    const levels = Array.isArray(sensor?.levels) ? sensor.levels : [];
-    if (!levels.length || typeof value !== 'number' || !Number.isFinite(value)) {
-        return '';
-    }
-    const index = Math.min(levels.length - 1, Math.max(0, Math.round(value)));
-    return String(levels[index] ?? '').trim();
+    return typeOf(sensor).words(sensor, value);
 }
 
 export function scoreLine(sensor, value, { carried = false, words = '' } = {}) {
     const detail = String(words ?? '');
-    return `${labelOf(sensor, sensor?.id)}: ${scoreText(value)}${detail ? ` - ${detail}` : ''}${carried ? ' (carried over)' : ''}`;
+    return `${labelOf(sensor, sensor?.id)}: ${valueText(sensor, value)}${detail ? ` - ${detail}` : ''}${carried ? ' (carried over)' : ''}`;
 }
 
 export function bandText(sensor, value) {
-    const levels = Array.isArray(sensor?.levels) ? sensor.levels : [];
-    const number = typeof value === 'number' ? value : Number.NaN;
-    if (!levels.length || !Number.isFinite(number)) {
-        return '';
-    }
-    const low = Math.min(levels.length - 1, Math.max(0, Math.floor(number)));
-    const words = String(levels[low] ?? '').trim();
-    if (!words) {
-        return '';
-    }
-    return low >= levels.length - 1 ? `${low}: ${words}` : `${low} to ${low + 1}: ${words}`;
-}
-
-export function gaugeFor(rule, history = []) {
-    const conditions = (rule?.conditions ?? []).filter(condition => condition?.sensor);
-    const first = conditions[0];
-    if (!first) {
-        return { value: null, threshold: 0, op: 'below', matching: false };
-    }
-    const latest = history.length ? history[history.length - 1] : null;
-    return {
-        value: scoreOf(latest, first.sensor),
-        threshold: Number.isFinite(Number(first.value)) ? Number(first.value) : 0,
-        op: first.op === 'above' ? 'above' : 'below',
-        matching: !!latest && conditions.every(condition => conditionHolds(latest, condition)),
-    };
-}
-
-function tickHolds(value, tick) {
-    return tick.op === 'above' ? value > tick.value : value < tick.value;
+    return typeOf(sensor).band(sensor, value);
 }
 
 export function stripChart({ columns = [], sensors = [], rules = [], fired: firedBy = {} } = {}) {
@@ -131,11 +72,7 @@ export function stripChart({ columns = [], sensors = [], rules = [], fired: fire
             for (const rule of active) {
                 for (const condition of rule.conditions ?? []) {
                     if (condition?.sensor === sensor.id) {
-                        ticks.push({
-                            rule: rule.id,
-                            op: condition.op === 'above' ? 'above' : 'below',
-                            value: Number(condition.value),
-                        });
+                        ticks.push({ rule: rule.id, condition });
                     }
                 }
             }
@@ -148,29 +85,13 @@ export function stripChart({ columns = [], sensors = [], rules = [], fired: fire
                     return {
                         index: column.index,
                         value,
-                        carried: value !== null && typeof column.own?.[sensor.id] !== 'number',
-                        matching: value !== null && ticks.some(tick => tickHolds(value, tick)),
+                        carried: value !== null && column.own?.[sensor.id] === undefined,
+                        matching: ticks.some(tick => conditionHolds(column, tick.condition)),
                     };
                 }),
             };
         }),
     };
-}
-
-export function conditionText(condition, sensors) {
-    if (!condition?.sensor) {
-        return '';
-    }
-    const op = condition.op === 'above' ? 'above' : 'below';
-    return `${sensorLabel(sensors, condition.sensor)} is ${op} ${Number(condition.value)}`;
-}
-
-export function conditionShort(condition, sensors) {
-    if (!condition?.sensor) {
-        return '';
-    }
-    const op = condition.op === 'above' ? 'above' : 'below';
-    return `${sensorLabel(sensors, condition.sensor)} ${op} ${Number(condition.value)}`;
 }
 
 export function ruleBrief(rule, sensors = []) {

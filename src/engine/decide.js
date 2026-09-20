@@ -27,18 +27,19 @@ function sinceRuleIn(chat, preset) {
 
 export function evaluationContext(chat, preset) {
     const lookback = Math.max(1, ...preset.rules.filter(rule => rule.enabled).map(rule => rule.window));
-    const carried = getHistory(chat, lookback, carryForwardIds(preset));
+    const carried = getHistory(chat, lookback, carryForwardIds(preset), preset.sensors);
     let plain = null;
     const historyFor = action => {
         if (actionOf(action)?.usesCarriedScores !== false) {
             return carried;
         }
-        plain ??= getHistory(chat, lookback);
+        plain ??= getHistory(chat, lookback, [], preset.sensors);
         return plain;
     };
     return {
         history: carried,
         historyFor,
+        sensors: preset.sensors,
         sensorIds: preset.sensors.map(sensor => sensor.id),
         gap: preset.gap,
         maxNudges: preset.maxNudges,

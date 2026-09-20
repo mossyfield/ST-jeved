@@ -7,8 +7,10 @@ const body = installDom();
 globalThis.document.getElementById = id => (id === 'extensions_settings2' ? body : null);
 globalThis.IntersectionObserver = class { observe() {} };
 
+const { SCHEMA_VERSION } = await import('../src/presets.js');
+
 const future = () => ({
-    schema: 3,
+    schema: SCHEMA_VERSION + 1,
     enabled: true,
     apiKey: 'k',
     model: 'future-model',

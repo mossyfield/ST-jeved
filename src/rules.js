@@ -1,22 +1,38 @@
 import { DEFAULT_ACTION, actionOf, ruleAction } from './actions.js';
 import { MAX_NUDGES } from './limits.js';
-import { replyWord, scoreText } from './util.js';
+import { conditionText, findSensor, hasValue, opOf, valueText } from './sensor-types.js';
+import { replyWord } from './util.js';
 
 export function scoreOf(entry, sensorId) {
     const value = entry?.scores?.[sensorId];
-    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+    return hasValue(null, value) ? value : null;
+}
+
+function confidentEnough(entry, condition) {
+    const least = condition?.minConfidence;
+    if (least === null || least === undefined) {
+        return true;
+    }
+    const level = entry?.confidence?.[condition.sensor];
+    return typeof level === 'number' && Number.isFinite(level) && level >= least;
 }
 
 export function conditionHolds(entry, condition) {
     const value = scoreOf(entry, condition?.sensor);
-    if (value === null) {
+    if (value === null || !confidentEnough(entry, condition)) {
         return false;
     }
     if (condition.op === 'below') {
-        return value < condition.value;
+        return typeof value === 'number' && value < condition.value;
     }
     if (condition.op === 'above') {
-        return value > condition.value;
+        return typeof value === 'number' && value > condition.value;
+    }
+    if (condition.op === 'is') {
+        return value === condition.value;
+    }
+    if (condition.op === 'is_not') {
+        return typeof value === 'string' && value !== condition.value;
     }
     return false;
 }
@@ -43,15 +59,19 @@ export function missingSensors(rule, sensorIds) {
     return [...new Set(used.filter(id => !known.has(id)))];
 }
 
-const formatScore = value => scoreText(value, 'missing');
+const opWords = op => opOf(op)?.words ?? String(op ?? '');
 
 function moreReplies(count) {
     return count === 1 ? '1 more reply' : `${count} more replies`;
 }
 
-function describe(rule, slice, count) {
-    const conditions = rule.conditions.map(condition => `${condition.sensor} ${condition.op} ${condition.value}`).join(' and ');
-    const values = slice.map(entry => formatScore(scoreOf(entry, rule.conditions[0].sensor))).join(', ');
+function describe(rule, sensors, slice, count) {
+    const conditions = rule.conditions
+        .map(condition => `${condition.sensor} ${opWords(condition.op)} ${valueText(findSensor(sensors, condition.sensor), condition.value, String(condition.value ?? ''))}`)
+        .join(' and ');
+    const first = rule.conditions[0].sensor;
+    const sensor = findSensor(sensors, first);
+    const values = slice.map(entry => valueText(sensor, scoreOf(entry, first), 'missing')).join(', ');
     return `${conditions} in ${count} of the last ${slice.length} replies: ${values}`;
 }
 
@@ -71,6 +91,7 @@ export function evaluate({
     history = [],
     rules = [],
     sensorIds = [],
+    sensors = [],
     action = DEFAULT_ACTION,
     gap = 0,
     maxNudges = 1,
@@ -103,7 +124,7 @@ export function evaluate({
         if (directive) {
             directives++;
         }
-        fired.push({ rule, reason: describe(rule, slice, count) });
+        fired.push({ rule, reason: describe(rule, sensors, slice, count) });
         if (actionOf(action)?.onlyOne) {
             break;
         }
@@ -118,7 +139,7 @@ export function sinceFire(action, position, firedAt) {
     return position - firedAt + (actionOf(action)?.fireOffset ?? 0);
 }
 
-export function replayRule({ history = [], rule = null, sensorIds = [], gap = 0 } = {}) {
+export function replayRule({ history = [], rule = null, sensorIds = [], sensors = [], gap = 0 } = {}) {
     if (!rule || !Array.isArray(rule.conditions) || !rule.conditions.length) {
         return [];
     }
@@ -132,6 +153,7 @@ export function replayRule({ history = [], rule = null, sensorIds = [], gap = 0 
             history: history.slice(0, i + 1),
             rules: [candidate],
             sensorIds,
+            sensors,
             action,
             gap,
             maxNudges: MAX_NUDGES.fallback,
@@ -149,13 +171,12 @@ export function replayRule({ history = [], rule = null, sensorIds = [], gap = 0 
 export function explain(rule, {
     history = [],
     sensorIds = [],
-    labels = {},
+    sensors = [],
     gap = 0,
     sinceAnyNudge = Infinity,
     sinceRule = () => Infinity,
     lastFired = [],
 } = {}) {
-    const name = id => labels[id] || id;
     if (rule && !ruleAction(rule)) {
         return {
             kind: 'warn',
@@ -195,7 +216,7 @@ export function explain(rule, {
         return {
             kind: 'warn',
             text: 'Blocked',
-            detail: `Blocked because ${name(rule.skipWhen.sensor)} is ${rule.skipWhen.op} ${rule.skipWhen.value} on the latest reply.`,
+            detail: `Blocked because ${conditionText(rule.skipWhen, sensors)} on the latest reply.`,
         };
     }
     const count = matchingCount(history, rule);

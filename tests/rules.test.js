@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { evaluate, explain, matchingCount, missingSensors, replayRule } from '../src/rules.js';
+import { conditionHolds, evaluate, explain, matchingCount, missingSensors, replayRule } from '../src/rules.js';
 
 let next = 0;
 const reply = scores => ({ index: next++, scores });
@@ -22,7 +22,14 @@ function rule(overrides = {}) {
     };
 }
 
-const ids = ['change', 'tension', 'tone', 'cost'];
+const scale = ['a', 'b', 'c', 'd', 'e'];
+const sensors = [
+    { id: 'change', label: 'Change', levels: scale },
+    { id: 'tension', label: 'Tension', levels: scale },
+    { id: 'tone', label: 'Tone', levels: scale },
+    { id: 'cost', label: 'Cost', levels: scale },
+];
+const ids = sensors.map(sensor => sensor.id);
 
 function run(history, rules, extra = {}) {
     return evaluate({ history, rules, sensorIds: ids, ...extra });
@@ -113,6 +120,20 @@ describe('evaluate', () => {
         assert.equal(hit.reason, 'change below 2.5 in 2 of the last 4 replies: 3, 1.3, missing, 1');
     });
 
+    it('writes the threshold and the values of the fire reason the way the sensor type reads', () => {
+        const typed = [
+            { id: 'danger', label: 'Danger', type: 'noul' },
+            { id: 'mood', label: 'Mood', type: 'choice', options: [{ name: 'calm' }, { name: 'angry' }] },
+        ];
+        const risky = rule({ need: 1, window: 1, conditions: [{ sensor: 'danger', op: 'above', value: 0.6 }] });
+        const [hit] = run([reply({ danger: 0.72 })], [risky], { sensors: typed, sensorIds: ['danger', 'mood'] });
+        assert.equal(hit.reason, 'danger above 60% in 1 of the last 1 replies: 72%');
+
+        const picked = rule({ need: 1, window: 1, conditions: [{ sensor: 'mood', op: 'is_not', value: 'calm' }] });
+        const [other] = run([reply({ mood: 'angry' })], [picked], { sensors: typed, sensorIds: ['danger', 'mood'] });
+        assert.equal(other.reason, 'mood is not calm in 1 of the last 1 replies: angry');
+    });
+
     it('holds a directive rule until the gap has passed', () => {
         assert.deepEqual(run(calm(), [rule()], { gap: 8, sinceAnyNudge: 7 }), []);
         assert.deepEqual(firedIds(run(calm(), [rule()], { gap: 8, sinceAnyNudge: 8 })), ['flat']);
@@ -166,6 +187,53 @@ describe('evaluate', () => {
         const own = [reply({ change: 1 })];
         assert.deepEqual(firedIds(run(carried, [swipeRule], { action: 'swipe' })), ['reroll']);
         assert.deepEqual(run(own, [swipeRule], { action: 'swipe' }), []);
+    });
+});
+
+describe('conditionHolds', () => {
+    const entry = (scores, confidence = {}) => ({ index: 0, scores, confidence });
+
+    it('compares a number with below and above', () => {
+        assert.equal(conditionHolds(entry({ change: 1 }), { sensor: 'change', op: 'below', value: 2 }), true);
+        assert.equal(conditionHolds(entry({ change: 2 }), { sensor: 'change', op: 'below', value: 2 }), false);
+        assert.equal(conditionHolds(entry({ change: 3 }), { sensor: 'change', op: 'above', value: 2 }), true);
+        assert.equal(conditionHolds(entry({ change: 2 }), { sensor: 'change', op: 'above', value: 2 }), false);
+    });
+
+    it('matches an option name with is and is not', () => {
+        assert.equal(conditionHolds(entry({ mood: 'calm' }), { sensor: 'mood', op: 'is', value: 'calm' }), true);
+        assert.equal(conditionHolds(entry({ mood: 'angry' }), { sensor: 'mood', op: 'is', value: 'calm' }), false);
+        assert.equal(conditionHolds(entry({ mood: 'angry' }), { sensor: 'mood', op: 'is_not', value: 'calm' }), true);
+        assert.equal(conditionHolds(entry({ mood: 'calm' }), { sensor: 'mood', op: 'is_not', value: 'calm' }), false);
+    });
+
+    it('never compares a word against a number, whichever way the sensor changed', () => {
+        assert.equal(conditionHolds(entry({ mood: 'calm' }), { sensor: 'mood', op: 'above', value: 1 }), false);
+        assert.equal(conditionHolds(entry({ mood: 'calm' }), { sensor: 'mood', op: 'below', value: 1 }), false);
+        assert.equal(conditionHolds(entry({ change: 1 }), { sensor: 'change', op: 'is', value: 'calm' }), false);
+        assert.equal(conditionHolds(entry({ change: 1 }), { sensor: 'change', op: 'is_not', value: 'calm' }), false);
+    });
+
+    it('waits for the confidence the condition asks for', () => {
+        const condition = { sensor: 'change', op: 'below', value: 2, minConfidence: 0.7 };
+        assert.equal(conditionHolds(entry({ change: 1 }, { change: 0.8 }), condition), true);
+        assert.equal(conditionHolds(entry({ change: 1 }, { change: 0.7 }), condition), true);
+        assert.equal(conditionHolds(entry({ change: 1 }, { change: 0.5 }), condition), false);
+        assert.equal(conditionHolds(entry({ change: 1 }), condition), false);
+        assert.equal(conditionHolds(entry({ change: 1 }), { ...condition, minConfidence: null }), true);
+    });
+
+    it('says no for a reply with no value and for a test it does not know', () => {
+        assert.equal(conditionHolds(entry({}), { sensor: 'change', op: 'below', value: 2 }), false);
+        assert.equal(conditionHolds(null, { sensor: 'change', op: 'below', value: 2 }), false);
+        assert.equal(conditionHolds(entry({ change: 1 }), { sensor: 'change', op: 'near', value: 2 }), false);
+    });
+
+    it('carries a choice rule through evaluate the same way', () => {
+        const picked = rule({ need: 2, window: 2, conditions: [{ sensor: 'tone', op: 'is_not', value: 'calm' }] });
+        const history = [entry({ tone: 'angry' }), entry({ tone: 'bored' })];
+        assert.deepEqual(firedIds(run(history, [picked])), ['flat']);
+        assert.deepEqual(run([entry({ tone: 'calm' }), entry({ tone: 'angry' })], [picked]), []);
     });
 });
 
@@ -236,8 +304,7 @@ describe('a rule whose action this Jeved does not know', () => {
 });
 
 describe('explain', () => {
-    const labels = { change: 'Change', tone: 'Tone', tension: 'Tension' };
-    const state = (history, extra = {}) => ({ history, sensorIds: ids, labels, ...extra });
+    const state = (history, extra = {}) => ({ history, sensorIds: ids, sensors, ...extra });
 
     it('says how many more replies must be measured', () => {
         const history = [reply({ change: 1 }), reply(null)];
@@ -298,6 +365,33 @@ describe('explain', () => {
         assert.equal(result.text, 'Blocked');
         assert.equal(result.kind, 'warn');
         assert.equal(result.detail, 'Blocked because Tension is above 2.5 on the latest reply.');
+    });
+
+    it('writes the blocking threshold the way its sensor type reads', () => {
+        const typed = [
+            ...sensors,
+            { id: 'danger', label: 'Danger', type: 'noul' },
+            { id: 'mood', label: 'Mood', type: 'choice', options: [{ name: 'calm' }] },
+        ];
+        const known = { sensors: typed, sensorIds: typed.map(sensor => sensor.id) };
+        const filler = [reply({ change: 1 }), reply({ change: 1 }), reply({ change: 1 })];
+
+        const gated = rule({ skipWhen: { sensor: 'danger', op: 'above', value: 0.6 } });
+        const risky = explain(gated, state([...filler, reply({ change: 1, danger: 0.8 })], known));
+        assert.equal(risky.detail, 'Blocked because Danger is above 60% on the latest reply.');
+
+        const picked = rule({ skipWhen: { sensor: 'mood', op: 'is', value: 'calm' } });
+        const settled = explain(picked, state([...filler, reply({ change: 1, mood: 'calm' })], known));
+        assert.equal(settled.detail, 'Blocked because Mood is calm on the latest reply.');
+    });
+
+    it('keeps the least confidence of the exception in the blocked detail', () => {
+        const gated = rule({ skipWhen: { sensor: 'tension', op: 'above', value: 2.5, minConfidence: 0.7 } });
+        const history = [reply({ change: 1 }), reply({ change: 1 }), reply({ change: 1 }), { index: 9, scores: { change: 1, tension: 3 }, confidence: { tension: 0.9 } }];
+        assert.equal(
+            explain(gated, state(history)).detail,
+            'Blocked because Tension is above 2.5 with at least 70% confidence on the latest reply.',
+        );
     });
 
     it('names the chip kind beside the words', () => {

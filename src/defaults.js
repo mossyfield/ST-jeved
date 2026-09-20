@@ -1,24 +1,23 @@
 import { DEFAULT_ACTION, NUDGE, REROLL } from './actions.js';
 import { defaultContextGroups } from './context-groups.js';
-import { LEVEL_COUNT, MAX_NUDGES, NUDGE_GAP } from './limits.js';
+import { MAX_NUDGES, NUDGE_GAP } from './limits.js';
+import { SCORE, blankLevels, seedCondition } from './sensor-types.js';
 
 export const BUILT_IN = 'Director';
-
-export function blankLevels() {
-    return Array.from({ length: LEVEL_COUNT }, () => '');
-}
 
 export function blankSensor(id) {
     return {
         id,
         label: '',
         watch: false,
+        type: SCORE,
         turns: 1,
         includeContext: false,
         includeUser: true,
         measureEvery: 1,
         question: '',
         levels: blankLevels(),
+        options: [],
     };
 }
 
@@ -28,7 +27,7 @@ export function blankRule(id, sensor) {
         label: '',
         enabled: false,
         action: DEFAULT_ACTION,
-        conditions: [{ sensor, op: 'below', value: 2 }],
+        conditions: [seedCondition(sensor)],
         need: 3,
         window: 4,
         skipWhen: null,
@@ -38,9 +37,9 @@ export function blankRule(id, sensor) {
     };
 }
 
-const reply = { turns: 1, includeContext: false, includeUser: true, measureEvery: 1 };
-const story = { turns: 5, includeContext: true, includeUser: false, measureEvery: 1 };
-const recent = { turns: 5, includeContext: false, includeUser: false, measureEvery: 3 };
+const reply = { type: SCORE, turns: 1, includeContext: false, includeUser: true, measureEvery: 1 };
+const story = { type: SCORE, turns: 5, includeContext: true, includeUser: false, measureEvery: 1 };
+const recent = { type: SCORE, turns: 5, includeContext: false, includeUser: false, measureEvery: 3 };
 
 const builtInSensors = [
     {

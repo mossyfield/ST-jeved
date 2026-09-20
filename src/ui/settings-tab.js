@@ -1,7 +1,8 @@
 import { BUILT_IN, builtInPreset } from '../defaults.js';
-import { readsTag, sensorLabel, tokenWords } from '../describe.js';
+import { readsTag, tokenWords } from '../describe.js';
+import { sensorLabel } from '../sensor-types.js';
 import { endpointWarning } from '../classifier.js';
-import { describeError, isPaused, lastErrorKind, measureBlockReason, measuredCount, nextReplyGroups, scriptParser, sessionCost, testConnection } from '../engine.js';
+import { describeError, isPaused, lastErrorKind, measureBlockReason, measuredCount, nextReplyGroups, scriptParser, sessionCost, sessionTokens, testConnection } from '../engine.js';
 import { CONTEXT_GROUPS, TRIM_KEY, groupLabel } from '../context-groups.js';
 import { buildContext } from '../instructions.js';
 import { CONTEXT_CAP, MAX_NUDGES, NUDGE_GAP, TIMEOUT_MS } from '../limits.js';
@@ -9,6 +10,7 @@ import { exportFileName, exportPreset, importPreset, isReservedKey, uniqueName }
 import { getPreset, getSettings, normaliseSettings, saveSettings } from '../settings.js';
 import { toast } from '../toast.js';
 import { refreshBadges } from './badge.js';
+import { hostPicker } from './hosts.js';
 import { actions, area, busy, button, checkbox, clampNumber, column, detach, editing, field, formRow, help, node, section, text, toggle, withReason } from './dom.js';
 import { ask, askForName, confirmImport, contextPopup, download, pickFile, problemsPopup } from './dialogs.js';
 
@@ -104,7 +106,18 @@ export function settingsTab(host) {
         const endpointField = field('text', settings.endpoint, '', value => {
             getSettings().endpoint = value;
             insecure.textContent = endpointWarning(value);
+            hosts.refresh();
             saveSettings();
+        });
+        const modelField = boundField(getSettings, 'model');
+        const hosts = hostPicker({
+            id: 'jeved_host',
+            onPick: () => {
+                const current = getSettings();
+                endpointField.value = current.endpoint;
+                modelField.value = current.model;
+                insecure.textContent = endpointWarning(current.endpoint);
+            },
         });
 
         return section(
@@ -115,8 +128,9 @@ export function settingsTab(host) {
                 saveSettings();
                 host.refreshOthers();
             }), actions(withReason(testButton, paused ? measureBlockReason() : ''))), 'Jeved stores the key as plain text in your SillyTavern settings file, so use a key you can revoke.'),
+            formRow('Host', hosts.element),
             formRow('Endpoint', column('', endpointField, insecure)),
-            formRow('Model', boundField(getSettings, 'model')),
+            formRow('Model', modelField),
             formRow('Timeout (ms)', boundField(getSettings, 'timeoutMs', { type: 'number', ...TIMEOUT_MS })),
         );
     }
@@ -211,11 +225,13 @@ export function settingsTab(host) {
             'jeved-hint',
             `${group.ids.map(id => sensorLabel(preset.sensors, id)).join(', ')} (${readsTag(group)})`,
         ));
+        const spent = sessionCost();
+        const used = `${sessionTokens().toLocaleString('en-US')} tokens`;
         return section(
             'Cost',
             calls,
             ...members,
-            formRow('Session cost', text('span', 'jeved-readout', `$${sessionCost().toFixed(6)}`)),
+            formRow('Session', text('span', 'jeved-readout', spent > 0 ? `${used} · $${spent.toFixed(6)}` : used)),
         );
     }
 

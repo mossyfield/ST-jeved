@@ -1,8 +1,9 @@
 import { DEFAULT_ACTION, isKnownAction } from './actions.js';
 import { provider } from './classifier.js';
-import { BUILT_IN, blankLevels, builtInPresets } from './defaults.js';
+import { BUILT_IN, builtInPresets } from './defaults.js';
 import { CONTEXT_CAP, MAX_NUDGES, NUDGE_GAP, RULE_COOLDOWN, RULE_COUNTS, TIMEOUT_MS, TURNS } from './limits.js';
 import { SCHEMA_VERSION, isReservedKey, normaliseContextGroups, presetVersion, stampVersion, upgradePreset } from './presets.js';
+import { normaliseCondition, normaliseSensor } from './sensor-types.js';
 import { clamp, isRecord } from './util.js';
 
 const settingsKey = 'jeved';
@@ -53,9 +54,7 @@ export function normalisePreset(preset) {
         for (const [key, spec] of Object.entries(SENSOR_NUMBERS)) {
             sensor[key] = clamp(sensor[key], spec);
         }
-        if (!Array.isArray(sensor.levels)) {
-            sensor.levels = blankLevels();
-        }
+        normaliseSensor(sensor);
     }
 
     for (const rule of preset.rules) {
@@ -74,9 +73,7 @@ export function normalisePreset(preset) {
         }
         for (const condition of [...rule.conditions, rule.skipWhen]) {
             if (condition) {
-                condition.sensor = String(condition.sensor ?? '');
-                condition.op = condition.op === 'above' ? 'above' : 'below';
-                condition.value = Number.isFinite(Number(condition.value)) ? Number(condition.value) : 0;
+                normaliseCondition(condition, preset.sensors.find(sensor => sensor.id === condition.sensor) ?? null);
             }
         }
     }

@@ -2,6 +2,7 @@ import { JEVED_UPDATED, describeError, isPaused, lastError, lastErrorKind, measu
 import { getSettings, normaliseSettings, saveSettings } from '../settings.js';
 import { toast } from '../toast.js';
 import { actions, busy, button, checkbox, detach, editing, field, node, picker, text, withReason } from './dom.js';
+import { hostPicker } from './hosts.js';
 import { leaveOpenTab, openWorkspace } from './workspace.js';
 
 const RECOVERY_MS = 20000;
@@ -63,7 +64,8 @@ function noteError() {
 
 function firstRun() {
     const block = node('div', 'info-block hint jeved-first-run');
-    const key = field('password', '', 'sk-or-...', value => {
+    const hosts = hostPicker({ id: 'jeved_first_host' }).element;
+    const key = field('password', '', '', value => {
         getSettings().apiKey = value;
         saveSettings();
     });
@@ -87,7 +89,8 @@ function firstRun() {
     testButton.id = 'jeved_first_test';
 
     block.append(
-        text('div', 'jeved-first-title', 'Paste an OpenRouter key to start.'),
+        text('div', 'jeved-first-title', 'Pick a host and paste its API key to start.'),
+        hosts,
         key,
         actions(withReason(testButton, paused ? measureBlockReason() : '')),
         text('div', 'jeved-hint', 'Each reply costs about two API calls, which is a fraction of a cent.'),

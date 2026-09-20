@@ -248,6 +248,21 @@
     flex-wrap: nowrap;
 }
 
+.jeved-scale .jeved-input {
+    flex: 0 0 110px;
+}
+
+.jeved-scale-word {
+    flex: 0 0 34px;
+    line-height: 22px;
+    font-size: 0.75em;
+    opacity: 0.7;
+}
+
+.jeved-condition-sure:not(:empty) {
+    padding-top: 4px;
+}
+
 .jeved-conditions,
 .jeved-unless {
     display: flex;
@@ -280,10 +295,8 @@
     font-size: 0.85em;
 }
 
-.jeved-preview-gauge .jeved-gauge {
-    flex: 0 0 auto;
-    width: min(100%, 260px);
-    height: 10px;
+.jeved-preview-latest .jeved-row {
+    gap: 8px;
 }
 
 .jeved-try-bar {
@@ -515,48 +528,6 @@
 .jeved-ok-mark {
     color: var(--active);
 }
-
-.jeved-gauge {
-    position: relative;
-    flex: 0 0 90px;
-    height: 10px;
-    border: 1px solid var(--SmartThemeBorderColor);
-    border-radius: 5px;
-    overflow: hidden;
-}
-
-.jeved-gauge-side {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    background-color: var(--golden);
-    opacity: 0.18;
-}
-
-.jeved-gauge-mark {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    width: 1px;
-    background-color: var(--SmartThemeBodyColor);
-    opacity: 0.8;
-}
-
-.jeved-gauge-dot {
-    position: absolute;
-    top: 50%;
-    width: 7px;
-    height: 7px;
-    margin: -3.5px 0 0 -3.5px;
-    border-radius: 50%;
-    background-color: var(--SmartThemeBodyColor);
-}
-
-.jeved-gauge-dot--on {
-    background-color: var(--golden);
-    box-shadow: 0 0 4px var(--golden);
-}
-
 
 .popup:has(#jeved_workspace) {
     width: min(1100px, calc(100dvw - 2em));
@@ -892,6 +863,7 @@
     justify-content: center;
     height: 100%;
     min-width: 0;
+    overflow: hidden;
     border: 0;
     border-radius: 4px;
     font-size: 0.72em;

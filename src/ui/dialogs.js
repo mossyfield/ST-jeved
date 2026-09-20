@@ -75,7 +75,7 @@ export async function confirmImport(name, preset, disabled = []) {
             body.append(text('div', 'jeved-hint', `${rule.label || rule.id}:`));
             body.append(text('pre', 'jeved-script-text', rule.script));
         }
-        body.append(text('div', 'jeved-hint', 'Jeved imports these rules turned off. Read each script before you turn its rule on.'));
+        body.append(text('div', 'jeved-hint', 'Jeved imports these rules turned off. The scripts run on their own when the rule fires, so read each one before you turn its rule on.'));
     }
     const result = await context.callGenericPopup(body, context.POPUP_TYPE.CONFIRM, '', {
         okButton: 'Import',

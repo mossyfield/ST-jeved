@@ -64,5 +64,5 @@ export { scriptParser } from './engine/scripts.js';
 export {
     JEVED_UPDATED, chatPreset, describeError, forceRule, forcedRule, historyStamp, invalidateMeasured,
     isActive, isMeasuring, isPaused, lastDecision, lastError, lastErrorKind, measureBlockReason,
-    measuredCount, sessionCost, setErrorText, status,
+    measuredCount, sessionCost, sessionTokens, setErrorText, status,
 } from './engine/status.js';

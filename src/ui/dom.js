@@ -1,4 +1,4 @@
-import { SCALE_MAX } from '../limits.js';
+const FULL_RANGE = { min: 0, max: 1, step: 0.1, decimals: 1 };
 
 export function clampNumber(value, min, max, decimals = 0) {
     const factor = 10 ** decimals;
@@ -188,34 +188,43 @@ export function segmented(options, value, onChange) {
     return group;
 }
 
-export function slider(value, onChange, { min = 0, max = SCALE_MAX, step = 0.1, decimals = 1, label = '' } = {}) {
+const exact = value => Math.round(value * 1e6) / 1e6;
+
+export function slider(value, onChange, { range = null, label = '' } = {}) {
+    const span = { ...FULL_RANGE, ...range };
+    const factor = span.percent ? 100 : 1;
+    const min = exact(span.min * factor);
+    const max = exact(span.max * factor);
+    const step = exact(span.step * factor);
+    const decimals = span.percent ? 0 : span.decimals;
     const fix = raw => clampNumber(raw, min, max, decimals);
+    const report = shown => onChange(exact(shown / factor));
     const wrap = node('div', 'jeved-slider');
-    const range = node('input', 'jeved-range', {
-        type: 'range', min: String(min), max: String(max), step: String(step), value: String(fix(value)), title: label,
+    const bar = node('input', 'jeved-range', {
+        type: 'range', min: String(min), max: String(max), step: String(step), value: String(fix(value * factor)), title: label,
     });
     const box = node('input', 'text_pole jeved-input jeved-number', {
-        type: 'number', min: String(min), max: String(max), step: String(step), value: String(fix(value)), title: label,
+        type: 'number', min: String(min), max: String(max), step: String(step), value: String(fix(value * factor)), title: label,
     });
-    range.addEventListener('input', () => {
-        const next = fix(range.value);
+    bar.addEventListener('input', () => {
+        const next = fix(bar.value);
         box.value = String(next);
-        onChange(next);
+        report(next);
     });
     box.addEventListener('input', () => {
         const typed = Number(box.value);
         if (Number.isFinite(typed) && typed >= min && typed <= max) {
-            range.value = String(typed);
-            onChange(fix(typed));
+            bar.value = String(typed);
+            report(fix(typed));
         }
     });
     box.addEventListener('change', () => {
         const next = fix(box.value);
         box.value = String(next);
-        range.value = String(next);
-        onChange(next);
+        bar.value = String(next);
+        report(next);
     });
-    wrap.append(range, box);
+    wrap.append(bar, box);
     return wrap;
 }
 
@@ -263,31 +272,6 @@ export function tag(caption, kind = '', title = '') {
     return element;
 }
 
-function percent(value) {
-    return `${Math.min(100, Math.max(0, (Number(value) / SCALE_MAX) * 100))}%`;
-}
-
-export function gauge({ value = null, threshold = 0, op = 'below', matching = false } = {}, title = '') {
-    const track = node('div', 'jeved-gauge', { title });
-    const side = node('div', 'jeved-gauge-side');
-    if (op === 'above') {
-        side.style.left = percent(threshold);
-        side.style.right = '0';
-    } else {
-        side.style.left = '0';
-        side.style.width = percent(threshold);
-    }
-    const mark = node('div', 'jeved-gauge-mark');
-    mark.style.left = percent(threshold);
-    track.append(side, mark);
-    if (typeof value === 'number' && Number.isFinite(value)) {
-        const dot = node('div', classes('jeved-gauge-dot', matching && 'jeved-gauge-dot--on'));
-        dot.style.left = percent(value);
-        track.append(dot);
-    }
-    return track;
-}
-
 export function problemBlock() {
     return node('div', 'info-block error jeved-problems', { hidden: true });
 }
@@ -325,6 +309,9 @@ function tryRow(item) {
     mark.append(text('span', 'jeved-try-index', `#${item.index}`));
     if (item.tag) {
         mark.append(tag(item.tag));
+    }
+    if (item.note) {
+        mark.append(note(item.note));
     }
     line.append(mark, text('div', 'jeved-try-text', item.text));
     return line;

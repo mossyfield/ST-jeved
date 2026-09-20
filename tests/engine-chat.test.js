@@ -65,7 +65,14 @@ globalThis.fetch = async (_url, options) => {
     }
     const answers = {};
     for (const id of ids) {
-        answers[id] = { score: 1 };
+        const { type, criteria } = body.questions[id];
+        if (type === 'choice') {
+            answers[id] = { choice: Object.keys(criteria)[0] };
+        } else if (type === 'noul') {
+            answers[id] = { noul: 0.5 };
+        } else {
+            answers[id] = { score: 1, confidence: 0.75, probabilities: { 1: 0.75 } };
+        }
     }
     return { ok: true, status: 200, json: async () => ({ answers, usage: { cost: 0 } }) };
 };
@@ -188,6 +195,29 @@ describe('planMeasurement', () => {
     it('plans nothing for a chat with no replies', () => {
         setChat('a', [user('only me')]);
         assert.deepEqual(planMeasurement({ all: true }), { tasks: [], calls: 0 });
+    });
+
+    it('does not ask for a choice sensor a second time once it has an option', async () => {
+        const preset = getSettings().presets.Director;
+        preset.sensors.push({
+            id: 'mood', label: 'Mood', watch: true, type: 'choice', turns: 1, includeContext: false, includeUser: true,
+            measureEvery: 1, question: 'Which mood fits `latest_turn`?', levels: [],
+            options: [{ name: 'calm', description: 'Settled.' }, { name: 'angry', description: 'Furious.' }],
+        });
+        setChat('a', [user('u0'), narrator('c0')]);
+
+        await rescan(planMeasurement({ all: true }).tasks);
+        assert.equal(getScores(context.chat[1]).scores.mood, 'calm');
+        assert.equal(planMeasurement().calls, 0);
+
+        preset.sensors.find(sensor => sensor.id === 'mood').options = [{ name: 'bored', description: 'Flat.' }, { name: 'angry', description: 'Furious.' }];
+        assert.equal(planMeasurement({ sensorId: 'mood' }).calls, 1);
+    });
+
+    it('stores the confidence that came with a score', async () => {
+        setChat('a', [user('u0'), narrator('c0')]);
+        await rescan(planMeasurement({ all: true }).tasks);
+        assert.equal(getScores(context.chat[1]).confidence.change, 0.75);
     });
 
     it('makes exactly as many calls as it planned, live and on a rescan', async () => {
@@ -464,6 +494,22 @@ describe('a paused chat', () => {
         const rows = await testSensor(draft, 1);
         assert.equal(rows.length, 1);
         assert.equal(seen.length, 1);
+    });
+
+    it('reports the value, the confidence and the probabilities of a test row', async () => {
+        setChat('a', [user('u0'), narrator('c0')]);
+        const [row] = await testSensor(draft, 1);
+        assert.equal(row.value, 1);
+        assert.equal(row.confidence, 0.75);
+        assert.deepEqual(row.probabilities, { 1: 0.75 });
+    });
+
+    it('says what a sensor of this type still needs before it can be tested', async () => {
+        setChat('a', [user('u0'), narrator('c0')]);
+        const [bare] = await testSensor({ ...draft, levels: [] }, 1);
+        assert.match(bare.error, /two score descriptions/);
+        const [picker] = await testSensor({ ...draft, type: 'choice', options: [] }, 1);
+        assert.match(picker.error, /two options/);
     });
 });
 
