@@ -7,7 +7,7 @@ const body = installDom();
 globalThis.document.getElementById = id => (id === 'extensions_settings2' ? body : null);
 globalThis.IntersectionObserver = class { observe() {} };
 
-const { SCHEMA_VERSION } = await import('../src/presets.js');
+const { SCHEMA_VERSION } = await import('../src/limits.js');
 
 const future = () => ({
     schema: SCHEMA_VERSION + 1,
@@ -17,8 +17,8 @@ const future = () => ({
     activePreset: 'Mine',
     somethingNew: true,
     presets: {
-        Mine: { description: '', sensors: [], rules: [], contextGroups: { main_prompt: true }, gap: 8, maxNudges: 1 },
-        Other: { description: '', sensors: [], rules: [], contextGroups: { main_prompt: true }, gap: 8, maxNudges: 1 },
+        Mine: { description: '', sensors: [], rules: [], contextGroups: { main_prompt: true }, somethingElse: 1 },
+        Other: { description: '', sensors: [], rules: [], contextGroups: { main_prompt: true }, somethingElse: 2 },
     },
 });
 

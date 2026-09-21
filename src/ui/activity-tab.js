@@ -1,10 +1,11 @@
 import { decisionSentence, entryWords, excerpt, levelText, rescanSentence, ruleLabel, scoreLine, stripChart } from '../describe.js';
 import { cancelRescan, chatPreset, clearChatScores, isRescanning, lastDecision, measureBlockReason, measuredCount, planMeasurement, plannedCalls, rescan } from '../engine.js';
 import { conditionTail, findSensor, hasValue, valueText } from '../sensor-types.js';
-import { carryForwardIds, measuredSensors } from '../sensors.js';
+import { measuredSensors } from '../sensors.js';
 import { getPreset, getSettings } from '../settings.js';
-import { currentChat, fired, getHistory, isNarrator, lastUserIndex } from '../store.js';
+import { MESSAGE_MOMENT, REPLY_MOMENT, currentChat, fired, getHistory, getScores, isNarrator, isUser, lastUserIndex } from '../store.js';
 import { toast } from '../toast.js';
+import { hashText } from '../util.js';
 import { ask } from './dialogs.js';
 import { actions, activate, button, help, node, section, text, withReason } from './dom.js';
 
@@ -13,17 +14,34 @@ const CELL_CHARS = 2;
 
 let progress = null;
 
-function firedOnReply(index) {
+function columnName(index) {
+    return isUser(currentChat()[index]) ? `Your message ${index}` : `Reply ${index}`;
+}
+
+function firedOn(index) {
     const messages = currentChat();
+    const message = messages[index];
+    if (isUser(message)) {
+        return fired(message);
+    }
     const user = lastUserIndex(messages, index);
-    if (user < 0 || messages.slice(user + 1, index).some(isNarrator)) {
+    if (user < 0) {
         return [];
     }
-    return fired(messages[user]);
+    const hash = hashText(message?.mes);
+    const direct = !messages.slice(user + 1, index).some(isNarrator);
+    return fired(messages[user])
+        .filter(entry => (entry?.reply === undefined ? direct : entry.reply === hash));
 }
 
 function buildColumns(preset) {
-    return getHistory(currentChat(), COLUMNS, carryForwardIds(preset), preset.sensors);
+    const chat = currentChat();
+    const columns = getHistory(chat, COLUMNS, REPLY_MOMENT, preset.sensors);
+    const last = chat.length - 1;
+    if (last >= 0 && isUser(chat[last]) && getScores(chat[last])) {
+        columns.push(...getHistory(chat, 1, MESSAGE_MOMENT, preset.sensors));
+    }
+    return columns.slice(Math.max(0, columns.length - COLUMNS));
 }
 
 function cellText(sensor, value) {
@@ -36,14 +54,11 @@ function cellElement(cell, sensor, label, onPick) {
     if (cell.value === null) {
         classes.push('jeved-cell--empty');
     }
-    if (cell.carried) {
-        classes.push('jeved-cell--carried');
-    }
     if (cell.matching) {
         classes.push('jeved-cell--on');
     }
     const element = node('div', classes.join(' '), {
-        title: `Reply ${cell.index}. ${label}: ${valueText(sensor, cell.value)}${cell.carried ? ' (carried over)' : ''}`,
+        title: `${columnName(cell.index)}. ${label}: ${valueText(sensor, cell.value)}`,
         tabIndex: 0,
     });
     element.dataset.jevedIndex = String(cell.index);
@@ -57,13 +72,12 @@ function cellElement(cell, sensor, label, onPick) {
 function stripElement(chart, sensors, onPick) {
     const strip = node('div', 'jeved-strip', { id: 'jeved_strip' });
     const track = `repeat(${COLUMNS}, minmax(6px, 1fr))`;
-    const offset = String(Math.max(1, COLUMNS - chart.columns.length + 1));
 
     const marks = node('div', 'jeved-strip-row jeved-strip-row--marks');
     const markCells = node('div', 'jeved-strip-cells');
     markCells.style.gridTemplateColumns = track;
     for (const item of chart.columns) {
-        const cell = node('div', 'jeved-mark-cell', { title: `Reply ${item.index}`, tabIndex: 0 });
+        const cell = node('div', 'jeved-mark-cell', { title: columnName(item.index), tabIndex: 0 });
         cell.dataset.jevedIndex = String(item.index);
         if (item.reroll) {
             cell.append(node('i', 'fa-solid fa-rotate jeved-mark jeved-mark--reroll', { title: 'Rerolled' }));
@@ -71,9 +85,6 @@ function stripElement(chart, sensors, onPick) {
             cell.append(node('i', 'fa-solid fa-arrow-right jeved-mark jeved-mark--nudge', { title: 'Nudged' }));
         }
         activate(cell, () => onPick(item.index));
-        if (!markCells.childElementCount) {
-            cell.style.gridColumnStart = offset;
-        }
         markCells.append(cell);
     }
     marks.append(text('span', 'jeved-strip-label', ''), markCells);
@@ -84,18 +95,18 @@ function stripElement(chart, sensors, onPick) {
         const line = node('div', 'jeved-strip-row');
         const cells = node('div', 'jeved-strip-cells');
         cells.style.gridTemplateColumns = track;
-        row.cells.forEach((cell, position) => {
-            const element = cellElement(cell, sensor, row.label, onPick);
-            if (!position) {
-                element.style.gridColumnStart = offset;
-            }
-            cells.append(element);
-        });
+        for (const cell of row.cells) {
+            cells.append(cellElement(cell, sensor, row.label, onPick));
+        }
         const label = node('span', 'jeved-strip-label');
         label.append(text('span', 'jeved-strip-name', row.label));
-        for (const tick of row.ticks) {
-            label.append(text('span', 'jeved-strip-rule', conditionTail(tick.condition, sensors)));
+        const tails = [...new Set(row.ticks.map(tick => conditionTail(tick.condition, sensors)))];
+        if (tails.length) {
+            const rule = text('span', 'jeved-strip-rule', tails.length > 1 ? `${tails[0]} +${tails.length - 1}` : tails[0]);
+            rule.title = tails.join(', ');
+            label.append(rule);
         }
+        label.title = row.label;
         line.append(label, cells);
         strip.append(line);
     }
@@ -105,25 +116,23 @@ function stripElement(chart, sensors, onPick) {
 function detailElement(preset, index, entry) {
     const block = node('div', 'jeved-detail', { id: 'jeved_detail' });
     if (index === null) {
-        block.append(help('Pick a column to see what happened on that reply.'));
+        block.append(help('Pick a column to see what happened there.'));
         return block;
     }
     const context = SillyTavern.getContext();
     const message = currentChat()[index];
-    block.append(text('h4', 'jeved-section-title', `Reply ${index}`));
+    block.append(text('h4', 'jeved-section-title', columnName(index)));
     block.append(text('div', 'jeved-excerpt', excerpt(message?.mes, 240)));
 
-    const own = entry?.own ?? {};
     const scores = entry?.scores ?? {};
     const lines = measuredSensors(preset)
         .filter(sensor => hasValue(sensor, scores[sensor.id]))
         .map(sensor => scoreLine(sensor, scores[sensor.id], {
             words: context.substituteParams(levelText(sensor, scores[sensor.id])),
-            carried: own[sensor.id] === undefined,
         }));
-    block.append(...(lines.length ? lines.map(line => text('div', 'jeved-detail-line', line)) : [help('This reply has no answers.')]));
+    block.append(...(lines.length ? lines.map(line => text('div', 'jeved-detail-line', line)) : [help('This message has no answers.')]));
 
-    const entries = firedOnReply(index);
+    const entries = firedOn(index);
     if (!entries.length) {
         block.append(help('No rule fired on this turn.'));
         return block;
@@ -156,7 +165,7 @@ export function activityTab(host) {
             return;
         }
         if (!tasks.length) {
-            toast('info', 'Every reply already has the scores it needs.');
+            toast('info', 'Every message already has the answers it needs.');
             return;
         }
         progress = { done: 0, total: tasks.length };
@@ -178,10 +187,10 @@ export function activityTab(host) {
         }
         const plan = planMeasurement({ all: true });
         if (!plan.tasks.length) {
-            toast('info', 'This chat has no replies to measure.');
+            toast('info', 'This chat has nothing to measure.');
             return;
         }
-        if (!await ask(`Clear the scores in this chat and measure it again? That costs ${plan.calls} API calls.`, { ok: 'Re-measure' })) {
+        if (!await ask(`Clear the answers in this chat and measure it again? That costs ${plan.calls} API calls.`, { ok: 'Re-measure' })) {
             return;
         }
         clearChatScores();
@@ -192,7 +201,7 @@ export function activityTab(host) {
         const preset = getPreset();
         const sensors = measuredSensors(preset);
         const columns = buildColumns(preset);
-        const firedBy = Object.fromEntries(columns.map(item => [item.index, firedOnReply(item.index)]));
+        const firedBy = Object.fromEntries(columns.map(item => [item.index, firedOn(item.index)]));
         const children = [];
 
         if (!sensors.length) {
@@ -204,7 +213,7 @@ export function activityTab(host) {
                 picked = index;
                 draw();
             }));
-            children.push(help("The newest reply is on the right. An amber answer met a rule's condition, and a faded answer was carried over."));
+            children.push(help("The newest message is on the right. An amber answer met a rule's condition."));
             children.push(detailElement(preset, picked, columns.find(column => column.index === picked)));
         }
 
@@ -214,19 +223,19 @@ export function activityTab(host) {
         if (marked && marked !== getSettings().activePreset && measuredCount() > 0) {
             const stale = node('div', 'info-block warning jeved-stale');
             stale.append(
-                text('div', '', `The scores in this chat came from the ${marked} preset.`),
+                text('div', '', `The answers in this chat came from the ${marked} preset.`),
                 actions(measureButton(`Re-measure this chat (${plannedCalls(true)} API calls)`, 'Clear and measure again', remeasure)),
             );
             children.push(stale);
         }
 
         children.push(actions(
-            measureButton(`Measure missing (${plannedCalls()} API calls)`, 'Measure the replies that have no score', () => run(planMeasurement({}).tasks)),
-            button('Clear scores', 'Remove every score in this chat', async () => {
-                if (!await ask("Clear every score in this chat? This can't be undone.", { ok: 'Clear' })) {
+            measureButton(`Measure missing (${plannedCalls()} API calls)`, 'Measure the messages that have no answer', () => run(planMeasurement({}).tasks)),
+            button('Clear answers', 'Remove every answer in this chat', async () => {
+                if (!await ask("Clear every answer in this chat? This can't be undone.", { ok: 'Clear' })) {
                     return;
                 }
-                toast('info', `Cleared ${clearChatScores()} measured replies.`);
+                toast('info', `Cleared the answers on ${clearChatScores()} messages.`);
                 host.refreshAll();
             }, { variant: 'danger' }),
         ));
@@ -234,7 +243,7 @@ export function activityTab(host) {
         if (isRescanning() || progress) {
             const line = node('div', 'jeved-progress', { id: 'jeved_progress' });
             line.append(
-                text('span', '', progress ? `Measured ${progress.done} of ${progress.total} replies.` : 'Measuring'),
+                text('span', '', progress ? `Measured ${progress.done} of ${progress.total} messages.` : 'Measuring'),
                 button('Stop', 'Stop measuring', cancelRescan),
             );
             children.push(line);

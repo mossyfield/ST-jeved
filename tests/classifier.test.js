@@ -347,6 +347,6 @@ describe('classify', () => {
     it('refuses an answer with no usable score', async () => {
         globalThis.fetch = reply({ answers: { tone: { score: null } } });
         const error = await fails(() => classify(base));
-        assert.equal(error.message, 'The endpoint returned no usable scores.');
+        assert.equal(error.message, 'The endpoint returned no usable answers.');
     });
 });

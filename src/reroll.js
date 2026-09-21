@@ -1,7 +1,11 @@
 import { REROLL } from './actions.js';
+import { MAX_WAIT_MS, POLL_MS } from './limits.js';
 
-export const POLL_MS = 100;
-export const MAX_WAIT_MS = 10000;
+const NOT_STARTED = ['skipped', 'none'];
+
+export function rerollStarted(status) {
+    return !NOT_STARTED.includes(String(status ?? ''));
+}
 
 function cancelReason(host, start) {
     if (!host.isActive()) {
@@ -26,7 +30,7 @@ function cancelReason(host, start) {
 }
 
 export async function runReroll(host) {
-    if (host.isGroup || !host.isLast() || !host.onLastSwipe() || host.hasSwipeEntry()) {
+    if (!host.isLast() || !host.onLastSwipe() || host.hasSwipeEntry()) {
         return { status: 'skipped' };
     }
     const hits = host.evaluate();

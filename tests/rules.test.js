@@ -23,13 +23,15 @@ function rule(overrides = {}) {
 }
 
 const scale = ['a', 'b', 'c', 'd', 'e'];
+const replySensor = (id, label) => ({ id, label, levels: scale, user: 1, assistant: 1 });
 const sensors = [
-    { id: 'change', label: 'Change', levels: scale },
-    { id: 'tension', label: 'Tension', levels: scale },
-    { id: 'tone', label: 'Tone', levels: scale },
-    { id: 'cost', label: 'Cost', levels: scale },
+    replySensor('change', 'Change'),
+    replySensor('tension', 'Tension'),
+    replySensor('tone', 'Tone'),
+    replySensor('cost', 'Cost'),
 ];
 const ids = sensors.map(sensor => sensor.id);
+const scene = { id: 'scene', label: 'Scene', levels: scale, user: 1, assistant: 0 };
 
 function run(history, rules, extra = {}) {
     return evaluate({ history, rules, sensorIds: ids, ...extra });
@@ -127,25 +129,25 @@ describe('evaluate', () => {
         ];
         const risky = rule({ need: 1, window: 1, conditions: [{ sensor: 'danger', op: 'above', value: 0.6 }] });
         const [hit] = run([reply({ danger: 0.72 })], [risky], { sensors: typed, sensorIds: ['danger', 'mood'] });
-        assert.equal(hit.reason, 'danger above 60% in 1 of the last 1 replies: 72%');
+        assert.equal(hit.reason, 'danger above 60% in 1 of the last 1 reply: 72%');
 
         const picked = rule({ need: 1, window: 1, conditions: [{ sensor: 'mood', op: 'is_not', value: 'calm' }] });
         const [other] = run([reply({ mood: 'angry' })], [picked], { sensors: typed, sensorIds: ['danger', 'mood'] });
-        assert.equal(other.reason, 'mood is not calm in 1 of the last 1 replies: angry');
+        assert.equal(other.reason, 'mood is not calm in 1 of the last 1 reply: angry');
     });
 
-    it('holds a directive rule until the gap has passed', () => {
-        assert.deepEqual(run(calm(), [rule()], { gap: 8, sinceAnyNudge: 7 }), []);
-        assert.deepEqual(firedIds(run(calm(), [rule()], { gap: 8, sinceAnyNudge: 8 })), ['flat']);
+    it('counts a message rule window in messages', () => {
+        const typed = [scene];
+        const early = rule({ need: 1, window: 1, conditions: [{ sensor: 'scene', op: 'below', value: 2 }] });
+        const [hit] = run([reply({ scene: 1 })], [early], { sensors: typed, sensorIds: ['scene'] });
+        assert.equal(hit.reason, 'scene below 2 in 1 of your last 1 message: 1');
     });
 
-    it('lets a script-only rule through the gap and fires it beside a directive rule', () => {
-        const script = rule({ id: 'log', directive: '', script: '/echo hello' });
-        assert.deepEqual(firedIds(run(calm(), [script], { gap: 8, sinceAnyNudge: 0 })), ['log']);
-        assert.deepEqual(
-            firedIds(run(calm(), [script, rule()], { gap: 8, sinceAnyNudge: Infinity })),
-            ['log', 'flat'],
-        );
+    it('fires every matching nudge rule on one turn, in preset order', () => {
+        const first = rule({ id: 'one' });
+        const second = rule({ id: 'two' });
+        assert.deepEqual(firedIds(run(calm(), [first, second])), ['one', 'two']);
+        assert.deepEqual(firedIds(run(calm(), [second, first])), ['two', 'one']);
     });
 
     it('holds a rule until its own cooldown has passed', () => {
@@ -158,14 +160,24 @@ describe('evaluate', () => {
         const first = rule({ id: 'one', cooldown: 5 });
         const second = rule({ id: 'two', cooldown: 0 });
         const sinceRule = id => (id === 'one' ? 1 : Infinity);
-        assert.deepEqual(firedIds(run(calm(), [first, second], { maxNudges: 2, sinceRule })), ['two']);
+        assert.deepEqual(firedIds(run(calm(), [first, second], { sinceRule })), ['two']);
     });
 
-    it('lets only maxNudges directive rules fire on one turn', () => {
-        const first = rule({ id: 'one' });
-        const second = rule({ id: 'two' });
-        assert.deepEqual(firedIds(run(calm(), [first, second])), ['one']);
-        assert.deepEqual(firedIds(run(calm(), [first, second], { maxNudges: 2 })), ['one', 'two']);
+    it('reads each rule on the history of its own moment', () => {
+        const typed = [...sensors, scene];
+        const replyRule = rule({ id: 'reply_rule', need: 1, window: 1 });
+        const messageRule = rule({ id: 'message_rule', need: 1, window: 1, conditions: [{ sensor: 'scene', op: 'below', value: 2 }] });
+        const histories = {
+            reply: [reply({ change: 1 })],
+            message: [reply({ scene: 1 })],
+        };
+        const hits = evaluate({
+            historyOf: item => histories[item.id === 'message_rule' ? 'message' : 'reply'],
+            rules: [replyRule, messageRule],
+            sensorIds: [...ids, 'scene'],
+            sensors: typed,
+        });
+        assert.deepEqual(firedIds(hits), ['reply_rule', 'message_rule']);
     });
 
     it('considers only the rules of the action it is asked for', () => {
@@ -174,19 +186,16 @@ describe('evaluate', () => {
         assert.deepEqual(firedIds(run(calm(), [swipeRule, rule()], { action: 'swipe' })), ['reroll']);
     });
 
-    it('fires at most one swipe rule and ignores the gap', () => {
+    it('fires at most one swipe rule', () => {
         const first = rule({ id: 'one', action: 'swipe' });
         const second = rule({ id: 'two', action: 'swipe' });
-        const hits = run(calm(), [first, second], { action: 'swipe', gap: 8, sinceAnyNudge: 0 });
-        assert.deepEqual(firedIds(hits), ['one']);
+        assert.deepEqual(firedIds(run(calm(), [first, second], { action: 'swipe' })), ['one']);
     });
 
     it('does not fire a swipe rule on a score the reply did not get', () => {
         const swipeRule = rule({ id: 'reroll', action: 'swipe', need: 1, window: 1, conditions: [{ sensor: 'tone', op: 'below', value: 1.5 }] });
-        const carried = [reply({ change: 1, tone: 1 })];
-        const own = [reply({ change: 1 })];
-        assert.deepEqual(firedIds(run(carried, [swipeRule], { action: 'swipe' })), ['reroll']);
-        assert.deepEqual(run(own, [swipeRule], { action: 'swipe' }), []);
+        assert.deepEqual(firedIds(run([reply({ change: 1, tone: 1 })], [swipeRule], { action: 'swipe' })), ['reroll']);
+        assert.deepEqual(run([reply({ change: 1 })], [swipeRule], { action: 'swipe' }), []);
     });
 });
 
@@ -247,27 +256,21 @@ describe('replayRule', () => {
         assert.deepEqual(turns(replayRule({ history, rule: flat, sensorIds: ids })), history.map(entry => entry.index));
     });
 
-    it('holds the rule back for the wait between nudges', () => {
-        const history = line(5);
-        const fired = turns(replayRule({ history, rule: flat, sensorIds: ids, gap: 3 }));
-        assert.deepEqual(fired, [history[0].index, history[3].index]);
-    });
-
     it('holds the rule back for its own cooldown', () => {
         const history = line(5);
         const fired = turns(replayRule({ history, rule: rule({ need: 1, window: 1, cooldown: 2 }), sensorIds: ids }));
         assert.deepEqual(fired, [history[0].index, history[2].index, history[4].index]);
     });
 
+    it('counts the cooldown in replies, not in history entries', () => {
+        const history = [0, 0, 1, 1, 2].map((replies, at) => ({ index: at, replies, scores: { change: 1 } }));
+        const fired = turns(replayRule({ history, rule: rule({ need: 1, window: 1, cooldown: 2 }), sensorIds: ids }));
+        assert.deepEqual(fired, [0, 4]);
+    });
+
     it('replays a rule that is turned off, so a draft can be tried', () => {
         const history = line(2);
         assert.equal(replayRule({ history, rule: rule({ need: 1, window: 1, enabled: false }), sensorIds: ids }).length, 2);
-    });
-
-    it('ignores the wait between nudges for a swipe rule', () => {
-        const history = line(3);
-        const swipe = rule({ need: 1, window: 1, action: 'swipe' });
-        assert.equal(replayRule({ history, rule: swipe, sensorIds: ids, gap: 10 }).length, 3);
     });
 
     it('returns nothing for a rule with no conditions and nothing to replay', () => {
@@ -278,7 +281,7 @@ describe('replayRule', () => {
 
     it('carries the reason of each turn', () => {
         const [first] = replayRule({ history: line(1), rule: flat, sensorIds: ids });
-        assert.equal(first.reason, 'change below 2.5 in 1 of the last 1 replies: 1');
+        assert.equal(first.reason, 'change below 2.5 in 1 of the last 1 reply: 1');
     });
 });
 
@@ -333,19 +336,32 @@ describe('explain', () => {
         assert.equal(status.detail, '0 of the last 4 replies match. The rule fires at 3.');
     });
 
-    it('counts down the wait between nudges and the rule cooldown', () => {
-        assert.equal(explain(rule(), state(calm(), { gap: 8, sinceAnyNudge: 5 })).text, 'Cooling down (3)');
+    it('counts down the rule cooldown in replies', () => {
         assert.equal(explain(rule({ cooldown: 4 }), state(calm(), { sinceRule: () => 3 })).text, 'Cooling down (1)');
+        assert.equal(explain(rule({ cooldown: 4 }), state(calm(), { sinceRule: () => 3 })).detail, 'This rule can fire again in 1 reply.');
     });
 
-    it('does not make a script-only rule wait for the gap', () => {
-        const script = rule({ directive: '', script: '/echo hello' });
-        assert.equal(explain(script, state(calm(), { gap: 8, sinceAnyNudge: 0 })).text, 'Fires next turn');
+    it('counts a message rule in messages', () => {
+        const typed = [scene];
+        const known = { sensors: typed, sensorIds: ['scene'] };
+        const early = rule({ need: 2, window: 3, conditions: [{ sensor: 'scene', op: 'below', value: 2 }] });
+        const history = [reply({ scene: 3 }), reply({ scene: 3 }), reply({ scene: 3 })];
+        assert.equal(explain(early, state(history, known)).detail, '0 of your last 3 messages match. The rule fires at 2.');
+        assert.equal(explain(early, state([reply(null)], known)).text, 'Needs 2 more messages');
     });
 
     it('says when another rule went first and when this rule matched', () => {
-        assert.equal(explain(rule(), state(calm(), { lastFired: ['drift'] })).text, 'Outranked this turn');
+        assert.equal(explain(rule({ action: 'swipe' }), state(calm(), { lastFired: ['drift'] })).text, 'Outranked this turn');
+        assert.equal(explain(rule(), state(calm(), { lastFired: ['drift'] })).text, 'Fires next turn');
         assert.equal(explain(rule(), state(calm(), { lastFired: ['flat'] })).text, 'Fired');
+    });
+
+    it('says an after-reply rule fires right after the reply, not next turn', () => {
+        assert.equal(explain(rule(), state(calm())).text, 'Fires next turn');
+        assert.equal(explain(rule({ action: 'swipe' }), state(calm())).text, 'Fires after this reply');
+        const scripted = rule({ action: 'script', directive: '', script: '/echo hi' });
+        assert.equal(explain(scripted, state(calm())).text, 'Fires after this reply');
+        assert.equal(explain(scripted, state(calm())).detail, 'This rule will fire right after the next reply.');
     });
 
     it('says when a sensor is gone', () => {
@@ -397,7 +413,7 @@ describe('explain', () => {
     it('names the chip kind beside the words', () => {
         assert.equal(explain(rule(), state(calm())).kind, 'fire');
         assert.equal(explain(rule(), state(calm(), { lastFired: ['flat'] })).kind, 'fire');
-        assert.equal(explain(rule(), state(calm(), { lastFired: ['drift'] })).kind, 'idle');
+        assert.equal(explain(rule({ action: 'swipe' }), state(calm(), { lastFired: ['drift'] })).kind, 'idle');
         assert.equal(explain(rule({ enabled: false }), state(calm())).kind, 'idle');
         assert.equal(explain(rule({ conditions: [{ sensor: 'gone', op: 'below', value: 1 }] }), state(calm())).kind, 'warn');
         assert.equal(explain(rule({ cooldown: 4 }), state(calm(), { sinceRule: () => 3 })).kind, 'busy');

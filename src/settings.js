@@ -1,16 +1,14 @@
 import { DEFAULT_ACTION, isKnownAction } from './actions.js';
 import { provider } from './classifier.js';
 import { BUILT_IN, builtInPresets } from './defaults.js';
-import { CONTEXT_CAP, MAX_NUDGES, NUDGE_GAP, RULE_COOLDOWN, RULE_COUNTS, TIMEOUT_MS, TURNS } from './limits.js';
-import { SCHEMA_VERSION, isReservedKey, normaliseContextGroups, presetVersion, stampVersion, upgradePreset } from './presets.js';
+import { CONTEXT_CAP, MESSAGES, RULE_COOLDOWN, RULE_COUNTS, SCHEMA_VERSION, TIMEOUT_MS } from './limits.js';
+import { isReservedKey, normaliseContextGroups, presetVersion, stampVersion, upgradePreset } from './presets.js';
 import { normaliseCondition, normaliseSensor } from './sensor-types.js';
+import { toast } from './toast.js';
 import { clamp, isRecord } from './util.js';
 
 const settingsKey = 'jeved';
-const EMPTY_PRESET = {
-    description: '', sensors: [], rules: [], contextGroups: {},
-    gap: NUDGE_GAP.fallback, maxNudges: MAX_NUDGES.fallback,
-};
+const EMPTY_PRESET = { description: '', sensors: [], rules: [], contextGroups: {} };
 
 let schemaAhead = 0;
 let shadow = null;
@@ -29,15 +27,11 @@ const defaultSettings = Object.freeze({
 });
 
 const NUMBERS = { timeoutMs: TIMEOUT_MS, instructionsCap: CONTEXT_CAP };
-const PRESET_NUMBERS = { gap: NUDGE_GAP, maxNudges: MAX_NUDGES };
-const SENSOR_NUMBERS = { turns: TURNS, measureEvery: TURNS };
+const SENSOR_NUMBERS = { user: MESSAGES, assistant: MESSAGES };
 
 export function normalisePreset(preset) {
     stampVersion(preset);
     normaliseContextGroups(preset);
-    for (const [key, spec] of Object.entries(PRESET_NUMBERS)) {
-        preset[key] = clamp(preset[key], spec);
-    }
     preset.description = String(preset.description ?? '');
     preset.sensors = (Array.isArray(preset.sensors) ? preset.sensors : []).filter(isRecord);
     preset.rules = (Array.isArray(preset.rules) ? preset.rules : []).filter(isRecord);
@@ -49,8 +43,7 @@ export function normalisePreset(preset) {
         sensor.id = String(sensor.id ?? '');
         sensor.label = String(sensor.label ?? '');
         sensor.watch = !!sensor.watch;
-        sensor.includeContext = !!sensor.includeContext;
-        sensor.includeUser = !!sensor.includeUser;
+        sensor.context = !!sensor.context;
         for (const [key, spec] of Object.entries(SENSOR_NUMBERS)) {
             sensor[key] = clamp(sensor[key], spec);
         }
@@ -138,8 +131,12 @@ export function initSettings() {
     if (schemaAhead) {
         return shadow;
     }
+    const notices = [];
     for (const preset of storedPresets(settings)) {
-        upgradePreset(preset);
+        upgradePreset(preset, notices);
+    }
+    for (const notice of new Set(notices)) {
+        toast('info', notice);
     }
     for (const key of Object.keys(defaultSettings)) {
         if (settings[key] === undefined) {

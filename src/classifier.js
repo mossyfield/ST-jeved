@@ -233,7 +233,7 @@ export async function classify({ endpoint, apiKey, model, state, questions, time
 
         const answers = readScores(data, questions);
         if (Object.keys(answers.scores).length === 0) {
-            throw new ClassifierError('The endpoint returned no usable scores.', 'other');
+            throw new ClassifierError('The endpoint returned no usable answers.', 'other');
         }
         return { ...answers, cost: Number(data?.usage?.cost) || 0, tokens: tokensIn(data?.usage) };
     } finally {

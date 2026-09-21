@@ -1,19 +1,26 @@
 import { cancelled, isCancelled, provider } from '../classifier.js';
 import { buildContext } from '../instructions.js';
-import { hasValue, typeOf } from '../sensor-types.js';
-import { buildRequest, groupSensors, groupSpec, measuredSensors, requestKey } from '../sensors.js';
+import { SAVE_DELAY } from '../limits.js';
+import { macroText, typeOf } from '../sensor-types.js';
+import {
+    buildRequest, groupSensors, groupSpec, hasInput, measuredSensors, missingIds, momentOf, NO_INPUT, requestKey,
+    sensorSignature,
+} from '../sensors.js';
 import { getPreset, getSettings } from '../settings.js';
-import { clearScores, getScores, isNarrator, narratorIndices, writeScores } from '../store.js';
-import { hashText } from '../util.js';
+import {
+    MESSAGE_MOMENT, REPLY_MOMENT, clearScores, getRecord, getScores, isNarrator, isUser, narratorIndices, userIndices,
+    writeScores,
+} from '../store.js';
+import { hashText, raceTimeout } from '../util.js';
 import {
     addCost, addTokens, clearError, describeError, invalidateMeasured, isPaused, markPreset, measureBlockReason,
     measuredCount, measuredStamp, notify, setError, setMeasuring,
 } from './status.js';
 
-const SAVE_DELAY = 1000;
-const MEASURED = 'measured';
-const FAILED = 'failed';
+export const MEASURED = 'measured';
+export const FAILED = 'failed';
 const SKIPPED = 'skipped';
+export const PARTIAL = 'partial';
 
 const pending = new Map();
 
@@ -78,8 +85,8 @@ function workSignal(signal) {
     return linked.signal;
 }
 
-export async function call(request, signal) {
-    const blocked = measureBlockReason();
+export async function call(request, signal, { manual = false } = {}) {
+    const blocked = measureBlockReason({ manual });
     if (blocked) {
         throw cancelled(blocked);
     }
@@ -102,7 +109,7 @@ export async function call(request, signal) {
 export function targetAt(index) {
     const context = SillyTavern.getContext();
     const message = context.chat[index];
-    if (!isNarrator(message) || !String(message.mes ?? '').trim()) {
+    if ((!isNarrator(message) && !isUser(message)) || !String(message.mes ?? '').trim()) {
         return null;
     }
     return { chatId: context.getCurrentChatId(), index, message, hash: hashText(message.mes) };
@@ -118,11 +125,10 @@ export function locate(target) {
         : context.chat.indexOf(target.message);
 }
 
-function commit(target, result, stamp) {
-    if (stamp !== revision || isPaused() || locate(target) < 0) {
+function commit(target, result, stamp, signal, fresh) {
+    if (stamp !== revision || signal?.aborted || isPaused() || locate(target) < 0) {
         return false;
     }
-    const fresh = measuredCount() === 0;
     writeScores(target.message, result.scores, target.hash, result.confidence);
     invalidateMeasured();
     if (fresh) {
@@ -133,16 +139,24 @@ function commit(target, result, stamp) {
 }
 
 async function sharedContext(preset, settings, groups, generationType) {
-    if (!groups.some(group => group.includeContext)) {
+    if (!groups.some(group => group.context)) {
         return null;
     }
     return (await buildContext(preset.contextGroups, settings.instructionsCap, generationType)).context;
 }
 
-function groupsFor(preset, position = null, pick = null) {
-    return groupSensors(preset, { due: position })
+function groupsFor(preset, moment, pick = null) {
+    return groupSensors(preset, { moment })
         .map(group => groupSpec({ ...group, ids: pick ? group.ids.filter(pick) : group.ids }))
         .filter(group => group.ids.length);
+}
+
+function momentSensors(preset, moment) {
+    return measuredSensors(preset).filter(sensor => momentOf(sensor) === moment);
+}
+
+export function missingMessageIds(preset, message) {
+    return missingIds(momentSensors(preset, MESSAGE_MOMENT), getScores(message)?.scores);
 }
 
 async function preparedRequests(preset, settings, groups, generationType) {
@@ -154,11 +168,24 @@ async function preparedRequests(preset, settings, groups, generationType) {
 
 export function liveTarget(index, generationType) {
     const target = targetAt(index);
-    if (!target) {
+    if (!target || !isNarrator(target.message)) {
         return null;
     }
-    const position = narratorIndices(SillyTavern.getContext().chat, { from: target.index + 1 }).length;
-    return { ...target, generationType, groups: groupsFor(getPreset(), position) };
+    return { ...target, generationType, groups: groupsFor(getPreset(), REPLY_MOMENT) };
+}
+
+export function messageTarget(index, { missingOnly = false } = {}) {
+    const target = targetAt(index);
+    if (!target || !isUser(target.message)) {
+        return null;
+    }
+    const preset = getPreset();
+    const missing = missingOnly ? new Set(missingMessageIds(preset, target.message)) : null;
+    return { ...target, groups: groupsFor(preset, MESSAGE_MOMENT, missing && (id => missing.has(id))) };
+}
+
+export function measureMessage(index, signal) {
+    return measure(messageTarget(index), signal);
 }
 
 async function runMeasurement(target, signal) {
@@ -178,6 +205,7 @@ async function runMeasurement(target, signal) {
 
     const results = await Promise.allSettled(requests.map(request => call(request, signal)));
     const current = stamp === revision;
+    const fresh = measuredCount() === 0;
     let stored = 0;
     let broke = false;
     for (const result of results) {
@@ -190,7 +218,7 @@ async function runMeasurement(target, signal) {
             }
             continue;
         }
-        stored += commit(target, result.value, stamp) ? 1 : 0;
+        stored += commit(target, result.value, stamp, signal, fresh) ? 1 : 0;
     }
     if (current && results.every(result => result.status === 'fulfilled')) {
         clearError();
@@ -198,16 +226,50 @@ async function runMeasurement(target, signal) {
     if (broke) {
         return FAILED;
     }
-    return stored ? MEASURED : SKIPPED;
+    if (!stored) {
+        return SKIPPED;
+    }
+    return askedIds(target).length && incomplete(target) ? PARTIAL : MEASURED;
+}
+
+function askedIds(target) {
+    return (target?.groups ?? []).flatMap(group => group.ids);
+}
+
+function askedPairs(target) {
+    return (target?.groups ?? []).flatMap(group => group.ids.map(id => `${group.key}=${id}`));
+}
+
+function incomplete(target) {
+    const missing = new Set(missingIds(measuredSensors(getPreset()), getScores(target.message)?.scores));
+    return askedIds(target).some(id => missing.has(id));
+}
+
+function keyOf(target) {
+    return `${target.chatId}:${target.index}:${target.hash}:${requestKey(target.groups)}`;
+}
+
+export function pendingMeasurement(target) {
+    if (!target) {
+        return null;
+    }
+    const wanted = askedPairs(target);
+    for (const held of pending.values()) {
+        const same = held.chatId === target.chatId && held.index === target.index && held.hash === target.hash;
+        if (same && wanted.every(pair => held.asked.has(pair))) {
+            return held.task;
+        }
+    }
+    return null;
 }
 
 export function measure(target, signal) {
     if (!target) {
         return null;
     }
-    const key = `${target.chatId}:${target.index}:${target.hash}:${requestKey(target.groups)}`;
+    const key = keyOf(target);
     if (pending.has(key)) {
-        return pending.get(key);
+        return pending.get(key).task;
     }
     const stamp = revision;
     const task = runMeasurement(target, signal)
@@ -218,7 +280,7 @@ export function measure(target, signal) {
             return FAILED;
         })
         .finally(() => {
-            if (pending.get(key) === task) {
+            if (pending.get(key)?.task === task) {
                 pending.delete(key);
                 setMeasuring(pending.size);
             }
@@ -226,7 +288,13 @@ export function measure(target, signal) {
                 notify({ index: target.index });
             }
         });
-    pending.set(key, task);
+    pending.set(key, {
+        task,
+        chatId: target.chatId,
+        index: target.index,
+        hash: target.hash,
+        asked: new Set(askedPairs(target)),
+    });
     setMeasuring(pending.size);
     return task;
 }
@@ -235,15 +303,7 @@ export async function waitForPending(limitMs) {
     if (!pending.size) {
         return;
     }
-    let timer = null;
-    try {
-        await Promise.race([
-            Promise.allSettled([...pending.values()]),
-            new Promise(resolve => { timer = setTimeout(resolve, limitMs); }),
-        ]);
-    } finally {
-        clearTimeout(timer);
-    }
+    await raceTimeout(Promise.allSettled([...pending.values()].map(held => held.task)), limitMs);
 }
 
 export async function testConnection() {
@@ -252,6 +312,37 @@ export async function testConnection() {
     clearError();
     notify();
     return result.scores[request.id];
+}
+
+export function testIndices(sensor, count) {
+    const chat = SillyTavern.getContext().chat;
+    const pick = momentOf(sensor) === MESSAGE_MOMENT ? userIndices : narratorIndices;
+    return pick(chat, { limit: count }).reverse();
+}
+
+export async function askOnce(sensor) {
+    if (!hasInput(sensor)) {
+        throw new Error(NO_INPUT);
+    }
+    if (typeOf(sensor).problems(sensor).length) {
+        throw new Error(typeOf(sensor).needs);
+    }
+    const settings = getSettings();
+    const preset = { ...getPreset(settings), sensors: [{ ...sensor, watch: true }], rules: [] };
+    const [group] = groupsFor(preset, momentOf(sensor));
+    if (!group) {
+        throw new Error(typeOf(sensor).needs);
+    }
+    const [index] = testIndices(sensor, 1);
+    if (index === undefined) {
+        throw new Error(momentOf(sensor) === MESSAGE_MOMENT
+            ? 'This chat has no message to ask about.'
+            : 'This chat has no reply to ask about.');
+    }
+    const controller = new AbortController();
+    const build = await preparedRequests(preset, settings, [group]);
+    const result = await call(build(index, group), controller.signal, { manual: true });
+    return macroText(sensor, result.scores[sensor.id]);
 }
 
 export async function testSensor(sensor, count, { signal, onResult } = {}) {
@@ -263,8 +354,8 @@ export async function testSensor(sensor, count, { signal, onResult } = {}) {
     const settings = getSettings();
     const id = String(sensor.id ?? '').trim() || 'draft';
     const preset = { ...getPreset(settings), sensors: [{ ...sensor, id, watch: true }], rules: [] };
-    const [group] = groupsFor(preset);
-    const indices = narratorIndices(context.chat, { limit: count }).reverse();
+    const [group] = groupsFor(preset, momentOf(sensor));
+    const indices = testIndices(sensor, count);
     const build = group ? await preparedRequests(preset, settings, [group]) : null;
     const rows = [];
     for (const index of indices) {
@@ -274,7 +365,7 @@ export async function testSensor(sensor, count, { signal, onResult } = {}) {
         const row = { index, text: String(context.chat[index]?.mes ?? '') };
         try {
             if (!build) {
-                throw new Error(typeOf(sensor).needs);
+                throw new Error(hasInput(sensor) ? typeOf(sensor).needs : NO_INPUT);
             }
             const result = await call(build(index, group), signal);
             row.value = result.scores[id];
@@ -296,31 +387,53 @@ export async function testSensor(sensor, count, { signal, onResult } = {}) {
 }
 
 export function nextReplyGroups() {
-    const indices = narratorIndices(SillyTavern.getContext().chat);
-    return groupSensors(getPreset(), { due: indices.length + 1 });
+    return groupSensors(getPreset(), { moment: REPLY_MOMENT });
+}
+
+export function nextMessageGroups() {
+    return groupSensors(getPreset(), { moment: MESSAGE_MOMENT });
+}
+
+function storedAt(target) {
+    const record = getRecord(target.message);
+    return record?.hash === target.hash ? record.scores : null;
 }
 
 export function planMeasurement({ limit = Infinity, all = false, sensorId = '' } = {}) {
     const context = SillyTavern.getContext();
     const preset = getPreset();
-    const indices = narratorIndices(context.chat);
     const tasks = [];
     let calls = 0;
 
-    const byId = new Map((preset.sensors ?? []).map(sensor => [sensor.id, sensor]));
-
-    indices.slice(0, limit).forEach((index, offset) => {
-        const stored = getScores(context.chat[index])?.scores ?? {};
-        const groups = groupsFor(preset, indices.length - offset, id => (!sensorId || id === sensorId)
-            && (all || !hasValue(byId.get(id) ?? null, stored[id])));
-        if (!groups.length) {
+    const plan = (indices, moment) => {
+        const built = groupSensors(preset, { moment })
+            .map(group => ({ ...group, ids: group.ids.filter(id => !sensorId || id === sensorId) }))
+            .filter(group => group.ids.length);
+        if (!built.length) {
             return;
         }
-        calls += groups.length;
-        tasks.push({ ...targetAt(index), groups });
-    });
+        const wanted = all ? [] : momentSensors(preset, moment);
+        for (const index of indices) {
+            const target = targetAt(index);
+            if (!target) {
+                continue;
+            }
+            const missing = all ? null : new Set(missingIds(wanted, storedAt(target)));
+            const groups = built
+                .map(group => groupSpec(missing ? { ...group, ids: group.ids.filter(id => missing.has(id)) } : group))
+                .filter(group => group.ids.length);
+            if (!groups.length) {
+                continue;
+            }
+            calls += groups.length;
+            tasks.push({ ...target, groups });
+        }
+    };
 
-    tasks.reverse();
+    plan(narratorIndices(context.chat).slice(0, limit), REPLY_MOMENT);
+    plan(userIndices(context.chat).slice(0, limit), MESSAGE_MOMENT);
+
+    tasks.sort((one, other) => one.index - other.index);
     return { tasks, calls };
 }
 
@@ -328,8 +441,7 @@ let plannedCache = { key: '', counts: {} };
 
 export function plannedCalls(all = false) {
     const context = SillyTavern.getContext();
-    const key = [measuredStamp(), context.getCurrentChatId(), context.chat.length, ...measuredSensors(getPreset())
-        .map(sensor => `${sensor.id}:${sensor.turns}:${sensor.includeContext ? 1 : 0}:${sensor.includeUser ? 1 : 0}:${sensor.measureEvery}`)]
+    const key = [measuredStamp(), context.getCurrentChatId(), context.chat.length, sensorSignature(getPreset())]
         .join('|');
     if (plannedCache.key !== key) {
         plannedCache = { key, counts: {} };

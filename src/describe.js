@@ -1,15 +1,34 @@
-import { DEFAULT_ACTION, replacesReply, ruleAction } from './actions.js';
-import { TURNS } from './limits.js';
+import { AFTER_REPLY, DEFAULT_ACTION, replacesReply, ruleAction } from './actions.js';
 import { conditionHolds, missingSensors, scoreOf } from './rules.js';
-import { conditionShort, conditionText, sensorLabel, typeOf, valueText } from './sensor-types.js';
-import { fired, isNarrator, lastUserIndex } from './store.js';
-import { clamp, replyWord } from './util.js';
+import { conditionText, sensorLabel, typeOf, valueText } from './sensor-types.js';
+import { NO_INPUT, hasInput, labelsFor, latestWords, momentCount, momentOf, momentOfRule, windowWords } from './sensors.js';
+import { MESSAGE_MOMENT, REPLY_MOMENT, firedFor, isNarrator, lastUserIndex } from './store.js';
 
-const turnsIn = sensor => clamp(sensor?.turns, TURNS);
+const LABEL_WORDS = {
+    latest_turn: 'the reply as `latest_turn`',
+    player_message: 'your message as `player_message`',
+    history: 'the earlier messages as `history`',
+    context: 'the card and prompts as `context`',
+};
 
-export function readsTag(sensor) {
-    const base = replyWord(turnsIn(sensor));
-    return sensor?.includeContext ? `${base} + context` : base;
+export function momentTag(moment) {
+    return moment === MESSAGE_MOMENT ? 'Before the reply' : 'After the reply';
+}
+
+export function ruleMomentNote(moment, phase) {
+    if (phase === AFTER_REPLY) {
+        return 'This rule acts right after the reply.';
+    }
+    return moment === MESSAGE_MOMENT
+        ? 'This rule acts on the reply that comes next.'
+        : 'This rule acts on your next turn.';
+}
+
+export function momentLine(sensor) {
+    if (!hasInput(sensor)) {
+        return NO_INPUT;
+    }
+    return momentOf(sensor) === MESSAGE_MOMENT ? 'Runs before the reply, on your message.' : 'Runs after each reply.';
 }
 
 export function listPhrase(items) {
@@ -20,15 +39,8 @@ export function listPhrase(items) {
 }
 
 export function questionKeysHint(sensor) {
-    const turns = turnsIn(sensor);
-    const keys = [turns === 1 ? 'the reply as `latest_turn`' : 'the replies as `latest_turns`'];
-    if (turns === 1 && sensor?.includeUser) {
-        keys.push('your message as `player_message`');
-    }
-    if (sensor?.includeContext) {
-        keys.push('the card and prompts as `context`');
-    }
-    return `Refer to ${listPhrase(keys)}.`;
+    const labels = labelsFor(sensor);
+    return labels.length ? `Refer to ${listPhrase(labels.map(label => LABEL_WORDS[label]))}.` : '';
 }
 
 export function tokenWords(count) {
@@ -47,9 +59,9 @@ export function levelText(sensor, value) {
     return typeOf(sensor).words(sensor, value);
 }
 
-export function scoreLine(sensor, value, { carried = false, words = '' } = {}) {
+export function scoreLine(sensor, value, { words = '' } = {}) {
     const detail = String(words ?? '');
-    return `${labelOf(sensor, sensor?.id)}: ${valueText(sensor, value)}${detail ? ` - ${detail}` : ''}${carried ? ' (carried over)' : ''}`;
+    return `${labelOf(sensor, sensor?.id)}: ${valueText(sensor, value)}${detail ? ` - ${detail}` : ''}`;
 }
 
 export function bandText(sensor, value) {
@@ -80,57 +92,42 @@ export function stripChart({ columns = [], sensors = [], rules = [], fired: fire
                 id: sensor.id,
                 label: sensorLabel(sensors, sensor.id),
                 ticks,
-                cells: columns.map(column => {
-                    const value = scoreOf(column, sensor.id);
-                    return {
-                        index: column.index,
-                        value,
-                        carried: value !== null && column.own?.[sensor.id] === undefined,
-                        matching: ticks.some(tick => conditionHolds(column, tick.condition)),
-                    };
-                }),
+                cells: columns.map(column => ({
+                    index: column.index,
+                    value: scoreOf(column, sensor.id),
+                    matching: ticks.some(tick => conditionHolds(column, tick.condition)),
+                })),
             };
         }),
     };
 }
 
-export function ruleBrief(rule, sensors = []) {
-    if (!rule) {
-        return '';
-    }
-    const parts = [ruleAction(rule)?.shortLabel || 'Unknown action'];
-    const when = (rule.conditions ?? [])
-        .filter(condition => condition?.sensor)
-        .map(condition => conditionShort(condition, sensors))
-        .join(', ');
-    if (when) {
-        parts.push(when);
-    }
-    if (String(rule.script ?? '').trim()) {
-        parts.push('Script');
-    }
-    return parts.join(' · ');
-}
-
-function countWords(rule) {
+function countWords(rule, moment) {
     const window = Math.max(1, Number(rule.window) || 1);
     const need = Math.min(window, Math.max(1, Number(rule.need) || 1));
     if (window === 1) {
-        return 'on the latest reply';
+        return `on ${latestWords(moment)}`;
     }
     if (need >= window) {
-        return `in all of the last ${window} replies`;
+        return `in all of ${windowWords(moment, window)}`;
     }
-    return `in at least ${need} of the last ${window} replies`;
+    return `in at least ${need} of ${windowWords(moment, window)}`;
 }
 
 function thenWords(rule) {
-    const parts = [];
     const action = ruleAction(rule);
-    if (action?.replacesReply || (action && String(rule.directive ?? '').trim())) {
+    const script = !!String(rule.script ?? '').trim();
+    if (!action) {
+        return script ? 'run a script' : 'do nothing';
+    }
+    if (!action.usesDirective) {
+        return script ? action.presentTense : 'do nothing';
+    }
+    const parts = [];
+    if (action.replacesReply || String(rule.directive ?? '').trim()) {
         parts.push(action.presentTense);
     }
-    if (String(rule.script ?? '').trim()) {
+    if (script) {
         parts.push('run a script');
     }
     return parts.length ? parts.join(' and ') : 'do nothing';
@@ -141,11 +138,11 @@ export function rescanSentence({ measured = 0, failed = 0 } = {}) {
         return 'Nothing was measured.';
     }
     if (!measured) {
-        return `Nothing was measured, because ${replyWord(failed)} failed.`;
+        return `Nothing was measured, because ${momentCount(MESSAGE_MOMENT, failed)} failed.`;
     }
     return failed
-        ? `Measured ${replyWord(measured)}, and ${failed} failed.`
-        : `Measured ${replyWord(measured)}.`;
+        ? `Measured ${momentCount(MESSAGE_MOMENT, measured)}, and ${failed} failed.`
+        : `Measured ${momentCount(MESSAGE_MOMENT, measured)}.`;
 }
 
 function fireWord(count) {
@@ -180,22 +177,23 @@ export function ruleSummary(rule, sensors = []) {
     if (!conditions.length) {
         return 'This rule has no conditions, so it never fires.';
     }
+    const moment = momentOfRule(rule, sensors);
     const when = conditions.map(condition => conditionText(condition, sensors)).join(' and ');
     const unless = rule.skipWhen?.sensor
-        ? `, except when ${conditionText(rule.skipWhen, sensors)} on the latest reply`
+        ? `, except when ${conditionText(rule.skipWhen, sensors)} on ${latestWords(moment)}`
         : '';
     const cooldown = Number(rule.cooldown) > 0
-        ? ` Then it waits ${replyWord(Number(rule.cooldown))} before it can fire again.`
+        ? ` Then it waits ${momentCount(REPLY_MOMENT, Number(rule.cooldown))} before it can fire again.`
         : '';
-    return `When ${when} ${countWords(rule)}${unless}, ${thenWords(rule)}.${cooldown}`;
+    return `When ${when} ${countWords(rule, moment)}${unless}, ${thenWords(rule)}.${cooldown}`;
 }
 
 export function entryWords(entry) {
     const action = ruleAction(entry);
-    if (action?.replacesReply) {
-        return action.pastTense;
+    if (!action) {
+        return 'ran a script';
     }
-    return entry?.text && action ? action.pastTense : 'ran a script';
+    return action.replacesReply || !action.usesDirective || entry?.text ? action.pastTense : 'ran a script';
 }
 
 export function decisionSentence(decision, rules = []) {
@@ -216,7 +214,7 @@ function alternativeEntry(chat, index) {
     if (user < 0 || chat.slice(user + 1, index).some(isNarrator)) {
         return null;
     }
-    const entry = fired(chat[user]).find(item => replacesReply(item) && item?.text);
+    const entry = firedFor(chat[user]).find(item => replacesReply(item) && item?.text);
     if (!entry || typeof entry.swipe !== 'number') {
         return null;
     }
@@ -230,7 +228,7 @@ export function badgeFor(chat, index) {
         return null;
     }
     if (message.is_user) {
-        const entries = fired(message).filter(entry => entry?.text && !replacesReply(entry));
+        const entries = firedFor(message).filter(entry => entry?.text && !replacesReply(entry));
         return entries.length ? { kind: DEFAULT_ACTION, index, entries } : null;
     }
     if (!isNarrator(message)) {

@@ -95,7 +95,7 @@ export const SENSOR_TYPES = [
         hasConfidence: true,
         needs: 'This sensor needs a question and two score descriptions.',
         about: 'Jev rates the reply on a scale that you describe.',
-        caption: sensor => `Score 0 to ${scaleMax(sensor)}`,
+        caption: sensor => `0 to ${scaleMax(sensor)}`,
         askTitle: 'Question',
         askPlaceholder: 'How much tension or pressure is in `latest_turn`?',
         scaleTitle: 'Scale',
@@ -123,6 +123,7 @@ export const SENSOR_TYPES = [
         coerce: (sensor, value) => (Number.isFinite(Number(value)) ? Number(value) : 0),
         valueProblem: (sensor, value) => (Number.isFinite(Number(value)) ? '' : 'the value is not a number'),
         format: (sensor, value, missing) => scoreText(value, missing),
+        macro: (sensor, value) => Number(value).toFixed(1),
         words: scoreWords,
         band(sensor, value) {
             const levels = levelsOf(sensor);
@@ -145,7 +146,7 @@ export const SENSOR_TYPES = [
         hasConfidence: true,
         needs: 'This sensor needs a question and two options.',
         about: 'Jev picks the one option that fits the reply best.',
-        caption: sensor => `Choice of ${optionNames(sensor).length}`,
+        caption: sensor => `${optionNames(sensor).length} options`,
         askTitle: 'Question',
         askPlaceholder: 'What is the mood of `latest_turn`?',
         scaleTitle: 'Options',
@@ -185,6 +186,7 @@ export const SENSOR_TYPES = [
         coerce: (sensor, value) => (typeof value === 'string' ? value.trim() : optionNames(sensor)[0] ?? ''),
         valueProblem: (sensor, value) => (optionNames(sensor).includes(String(value ?? '').trim()) ? '' : `no option named '${value}'`),
         format: (sensor, value, missing) => (typeof value === 'string' && value ? value : missing),
+        macro: (sensor, value) => String(value),
         words: (sensor, value) => String(optionsOf(sensor)
             .find(option => String(option.name ?? '').trim() === value)?.description ?? '').trim(),
         band: () => '',
@@ -222,6 +224,7 @@ export const SENSOR_TYPES = [
         coerce: (sensor, value) => (Number.isFinite(Number(value)) ? Math.min(1, Math.max(0, Number(value))) : 0.5),
         valueProblem: (sensor, value) => (within(Number(value), 1) ? '' : 'the value must be a number from 0 to 1'),
         format: (sensor, value, missing) => (numberOf(value) === null ? missing : `${Math.round(value * 100)}%`),
+        macro: (sensor, value) => String(Math.round(value * 100)),
         words: noulWords,
         band: noulWords,
     },
@@ -275,6 +278,10 @@ export function sensorLabel(sensors, id) {
 
 export function valueText(sensor, value, missing = 'not measured') {
     return typeOf(sensor).format(sensor, value, missing);
+}
+
+export function macroText(sensor, value) {
+    return hasValue(sensor, value) ? typeOf(sensor).macro(sensor, value) : '';
 }
 
 function conditionParts(condition, sensors) {

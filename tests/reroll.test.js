@@ -27,7 +27,6 @@ function fake(overrides = {}) {
         ...overrides,
     };
     const host = {
-        isGroup: !!world.isGroup,
         isActive: () => world.active,
         getChatId: () => world.chatId,
         isLast: () => world.last,
@@ -123,8 +122,8 @@ describe('runReroll', () => {
         assert.equal(world.reports.length, 0);
     });
 
-    it('does nothing in a group chat, on an older reply, or when the reply is not on its last swipe', async () => {
-        for (const broken of [{ isGroup: true }, { last: false }, { lastSwipe: false }]) {
+    it('does nothing on an older reply, or when the reply is not on its last swipe', async () => {
+        for (const broken of [{ last: false }, { lastSwipe: false }]) {
             const { host, world } = fake(broken);
             assert.equal((await runReroll(host)).status, 'skipped');
             assert.equal(world.entries.length, 0);

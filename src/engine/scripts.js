@@ -1,7 +1,7 @@
+import { SCRIPT_LIMIT_MS } from '../limits.js';
 import { toast } from '../toast.js';
 import { SCRIPT_ERROR, describeError, notify, setErrorText } from './status.js';
 
-const SCRIPT_LIMIT_MS = 5000;
 const TIMED_OUT = Symbol('timed out');
 
 export function scriptParser() {

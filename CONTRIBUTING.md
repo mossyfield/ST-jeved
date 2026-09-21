@@ -29,11 +29,17 @@
 
 ## Where to make a change
 
-- A new rule action. Add one entry to `ACTIONS` in `src/actions.js`. Validation reads from that
-  list. An action that runs before the generation needs no engine change. The reroll is the only
-  action that runs after the reply, and `src/engine/decide.js` handles it by name, so a second one
-  needs changes there. The chart, the badges and the action picker also name nudge and reroll.
-  Search `src/describe.js`, `src/ui` and `style.css` for both.
+- A new rule action. Add one entry to `ACTIONS` in `src/actions.js`. Validation, the rule form and
+  the rule texts read its fields (`usesDirective`, `needsScript`, `needsReplySensor`, `runsInGroup`, `about`), so
+  put the behaviour there and do not branch on the action id in another module. An action that runs
+  before the generation needs no engine change. Reroll and Run script run after the reply, and
+  `afterReply` in `src/engine/decide.js` handles each of them by name, so a third one needs a
+  change there. `style.css` names nudge and reroll for the chart marks and the badge.
+- A sensor's moment. A sensor with `assistant` at 0 is measured on the user's message inside the
+  generate interceptor. Any other sensor is measured on the reply. `momentOf` and `momentOfRule` in
+  `src/sensors.js` decide this. A rule is evaluated on the history of its moment (`getHistory` in
+  `src/store.js`). Decisions and firing receipts are stored on the user message, answers on the
+  message that was measured.
 - A new sensor type. Add one entry to `SENSOR_TYPES` in `src/sensor-types.js`. Validation and the
   classifier read from that list. Then make the sensor pane in `src/ui/sensors-tab.js` show the
   fields that the type needs.
@@ -45,8 +51,9 @@
   says so. The TypeSafe entry is the example. A different wire format needs a second `provider`
   object in the same file, a provider picker in Settings, and generic text where the UI names Jev.
 - A new field. Add its default to `blankSensor` or `blankRule` in `src/defaults.js`. Import keeps
-  only the fields that are there. Increase `SCHEMA_VERSION` in `src/presets.js`. Add one entry to
-  `MIGRATIONS`, keyed by the version you migrate from, that gives older presets the default. Add a
+  only the fields that are there. Increase `SCHEMA_VERSION` in `src/limits.js`. Add one entry to
+  `MIGRATIONS` in `src/presets.js`, keyed by the version you migrate from, that gives older presets
+  the default. The built-in presets in `src/defaults.js` carry the current version. Add a
   check to `validatePreset` if the field needs one. Jeved must never change settings or files from
   a newer schema.
 

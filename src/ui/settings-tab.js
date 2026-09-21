@@ -1,11 +1,11 @@
 import { BUILT_IN, builtInPreset } from '../defaults.js';
-import { readsTag, tokenWords } from '../describe.js';
+import { tokenWords } from '../describe.js';
 import { sensorLabel } from '../sensor-types.js';
 import { endpointWarning } from '../classifier.js';
-import { describeError, isPaused, lastErrorKind, measureBlockReason, measuredCount, nextReplyGroups, scriptParser, sessionCost, sessionTokens, testConnection } from '../engine.js';
+import { describeError, isPaused, lastErrorKind, measureBlockReason, measuredCount, nextMessageGroups, nextReplyGroups, scriptParser, sessionCost, sessionTokens, testConnection } from '../engine.js';
 import { CONTEXT_GROUPS, TRIM_KEY, groupLabel } from '../context-groups.js';
 import { buildContext } from '../instructions.js';
-import { CONTEXT_CAP, MAX_NUDGES, NUDGE_GAP, TIMEOUT_MS } from '../limits.js';
+import { CONTEXT_CAP, TIMEOUT_MS } from '../limits.js';
 import { exportFileName, exportPreset, importPreset, isReservedKey, uniqueName } from '../presets.js';
 import { getPreset, getSettings, normaliseSettings, saveSettings } from '../settings.js';
 import { toast } from '../toast.js';
@@ -64,6 +64,9 @@ export function settingsTab(host) {
         settings.activePreset = result.name;
         commitSettings(settings);
         toast('success', `The preset ${result.name} was imported.`);
+        for (const notice of result.notices ?? []) {
+            toast('info', notice);
+        }
     }
 
     function drawConnection() {
@@ -206,7 +209,7 @@ export function settingsTab(host) {
 
         return section(
             'Context sent to Jev',
-            help('Sensors with Include context on get the groups you tick here.'),
+            help('Sensors with Context on get the groups you tick here.'),
             grid,
             total,
             cut,
@@ -215,31 +218,34 @@ export function settingsTab(host) {
         );
     }
 
+    function callLines(preset, groups, headline, id) {
+        const line = text('div', 'jeved-readout', headline);
+        line.id = id;
+        return [
+            line,
+            ...groups.map(group => text('div', 'jeved-hint', group.ids.map(item => sensorLabel(preset.sensors, item)).join(', '))),
+        ];
+    }
+
     function costSection() {
         const preset = getPreset();
-        const groups = nextReplyGroups();
-        const calls = text('div', 'jeved-readout', `Next reply: ${groups.length} API ${groups.length === 1 ? 'call' : 'calls'}`);
-        calls.id = 'jeved_calls';
-        const members = groups.map(group => text(
-            'div',
-            'jeved-hint',
-            `${group.ids.map(id => sensorLabel(preset.sensors, id)).join(', ')} (${readsTag(group)})`,
-        ));
+        const replies = nextReplyGroups();
+        const messages = nextMessageGroups();
         const spent = sessionCost();
         const used = `${sessionTokens().toLocaleString('en-US')} tokens`;
         return section(
             'Cost',
-            calls,
-            ...members,
+            ...callLines(preset, replies, `Each reply: ${replies.length} API ${replies.length === 1 ? 'call' : 'calls'}`, 'jeved_calls'),
+            ...(messages.length
+                ? callLines(preset, messages, `Each of your messages: ${messages.length} API ${messages.length === 1 ? 'call' : 'calls'}, before the reply`, 'jeved_message_calls')
+                : []),
             formRow('Session', text('span', 'jeved-readout', spent > 0 ? `${used} · $${spent.toFixed(6)}` : used)),
         );
     }
 
-    function nudges() {
+    function badges() {
         return section(
-            'Nudges',
-            formRow('Nudge spacing (replies)', boundField(getPreset, 'gap', { type: 'number', ...NUDGE_GAP })),
-            formRow('Max nudges per turn', boundField(getPreset, 'maxNudges', { type: 'number', ...MAX_NUDGES })),
+            'Badges',
             formRow('Show badges', toggle(getSettings().showBadge, 'Show a badge on each message where a rule fired', value => {
                 getSettings().showBadge = value;
                 saveSettings();
@@ -326,7 +332,7 @@ export function settingsTab(host) {
         if (element.childNodes.length && editing(element)) {
             return;
         }
-        element.replaceChildren(drawConnection(), contextSection(), costSection(), nudges(), presetSection());
+        element.replaceChildren(drawConnection(), contextSection(), costSection(), badges(), presetSection());
     }
 
     draw();

@@ -1,8 +1,73 @@
-import { interceptGeneration, maybeReroll } from './engine/decide.js';
-import { cancelWork, liveTarget, measure, saver } from './engine/measure.js';
-import { forgetSession, invalidateMeasured, isActive, notify, setError, setPaused as writePaused } from './engine/status.js';
+import { afterReply, interceptGeneration, waitsForScripts } from './engine/decide.js';
+import { cancelWork, liveTarget, measure, measureMessage, saver } from './engine/measure.js';
+import { forgetSession, invalidateMeasured, isActive, isRerolling, notify, setError, setPaused as writePaused } from './engine/status.js';
+import { EDIT_DELAY_MS } from './limits.js';
+import { getRecord, isNarrator } from './store.js';
+import { hashText } from './util.js';
 
 const RELOAD_EVENTS = ['MESSAGE_EDITED', 'MESSAGE_UPDATED', 'MESSAGE_DELETED', 'MESSAGE_SWIPED', 'MORE_MESSAGES_LOADED'];
+
+const EDIT_RETRIES = 5;
+
+const editTimers = new Map();
+
+export function cancelEditTimers() {
+    for (const timer of editTimers.values()) {
+        clearTimeout(timer);
+    }
+    editTimers.clear();
+}
+
+function startEditTimer(message, chatId, tries = 0) {
+    const running = editTimers.get(message);
+    if (running) {
+        clearTimeout(running);
+    }
+    editTimers.set(message, setTimeout(() => remeasureEdited(message, chatId, tries), EDIT_DELAY_MS));
+}
+
+function remeasureEdited(message, chatId, tries = 0) {
+    try {
+        editTimers.delete(message);
+        const context = SillyTavern.getContext();
+        if (!isActive() || context.getCurrentChatId() !== chatId) {
+            return;
+        }
+        if (isRerolling()) {
+            if (tries < EDIT_RETRIES) {
+                startEditTimer(message, chatId, tries + 1);
+            }
+            return;
+        }
+        const index = context.chat.indexOf(message);
+        if (index < 0) {
+            return;
+        }
+        if (isNarrator(message)) {
+            measure(liveTarget(index));
+        } else {
+            measureMessage(index);
+        }
+    } catch (error) {
+        setError(error);
+        notify();
+    }
+}
+
+export function onMessageEdited(messageId) {
+    try {
+        const context = SillyTavern.getContext();
+        const message = context.chat[Number(messageId)];
+        const record = getRecord(message);
+        if (!record?.scores || record.hash === hashText(message.mes)) {
+            return;
+        }
+        startEditTimer(message, context.getCurrentChatId());
+    } catch (error) {
+        setError(error);
+        notify();
+    }
+}
 
 export function initEngine() {
     const context = SillyTavern.getContext();
@@ -17,6 +82,12 @@ export function initEngine() {
             });
         }
     }
+    if (context.eventTypes?.MESSAGE_EDITED) {
+        context.eventSource.on(context.eventTypes.MESSAGE_EDITED, onMessageEdited);
+    }
+    if (context.eventTypes?.MESSAGE_DELETED) {
+        context.eventSource.on(context.eventTypes.MESSAGE_DELETED, cancelEditTimers);
+    }
 }
 
 export function onCharacterMessage(messageId, type) {
@@ -29,35 +100,41 @@ export function onCharacterMessage(messageId, type) {
         if (!task) {
             return;
         }
-        task.then(() => maybeReroll(target)).catch(error => {
+        const chain = task.then(() => afterReply(target)).catch(error => {
             setError(error);
             notify();
         });
+        if (waitsForScripts()) {
+            return chain;
+        }
     } catch (error) {
         setError(error);
         notify();
     }
+    return undefined;
 }
 
 export function setPaused(paused) {
     writePaused(paused);
     if (paused) {
         cancelWork();
+        cancelEditTimers();
         notify();
     }
 }
 
 export function onChatChanged() {
     cancelWork();
+    cancelEditTimers();
     invalidateMeasured();
     forgetSession();
     notify();
 }
 
-export { evaluationContext, interceptGeneration, rerollOutcome } from './engine/decide.js';
+export { evaluationContext, historiesFor, interceptGeneration, rerollOutcome } from './engine/decide.js';
 export {
-    cancelRescan, clearChatScores, isRescanning, nextReplyGroups, planMeasurement, plannedCalls,
-    targetAt, testConnection, testSensor,
+    askOnce, cancelRescan, clearChatScores, isRescanning, nextMessageGroups, nextReplyGroups, planMeasurement,
+    plannedCalls, targetAt, testConnection, testIndices, testSensor,
 } from './engine/measure.js';
 export { rescan } from './engine/rescan.js';
 export { scriptParser } from './engine/scripts.js';

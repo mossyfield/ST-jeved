@@ -1,23 +1,23 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { builtInPreset } from '../src/defaults.js';
-import { buildRequest, carryForwardIds, groupSensors, groupSpec, measuredSensors, neededSensorIds, requestKey } from '../src/sensors.js';
+import {
+    buildRequest, groupSensors, groupSpec, hasInput, labelsFor, measuredSensors, momentOf, momentOfRule,
+    neededSensorIds, requestKey,
+} from '../src/sensors.js';
+import { narrator, user } from './helpers/chat.js';
 
 const ids = preset => measuredSensors(preset).map(sensor => sensor.id);
 const keys = groups => groups.map(group => group.ids);
-
-const user = mes => ({ mes, is_user: true });
-const narrator = mes => ({ mes });
 
 function sensor(overrides = {}) {
     return {
         id: 'a',
         label: 'A',
         watch: true,
-        turns: 1,
-        includeContext: false,
-        includeUser: true,
-        measureEvery: 1,
+        user: 1,
+        assistant: 1,
+        context: false,
         question: 'q',
         levels: ['a', 'b', 'c', 'd', 'e'],
         ...overrides,
@@ -30,15 +30,29 @@ const substitute = value => String(value ?? '');
 describe('which sensors are measured', () => {
     it('measures only what the enabled rules of the built-in preset name', () => {
         const preset = builtInPreset();
-        assert.deepEqual([...neededSensorIds(preset)].sort(), ['change', 'repeats', 'tension', 'tone']);
-        assert.deepEqual(ids(preset), ['change', 'tension', 'repeats', 'tone']);
+        assert.deepEqual([...neededSensorIds(preset)].sort(), ['attention', 'cost', 'repeats', 'scene', 'speaks', 'tension', 'tone']);
+        assert.deepEqual(ids(preset), ['tension', 'cost', 'speaks', 'repeats', 'tone', 'scene', 'attention']);
+    });
+
+    it('makes three calls for each reply and one for each message, and leaves the off rules alone', () => {
+        const preset = builtInPreset();
+        assert.deepEqual(keys(groupSensors(preset, { moment: 'reply' })), [
+            ['tension', 'cost', 'speaks', 'attention'],
+            ['repeats'],
+            ['tone'],
+        ]);
+        assert.deepEqual(keys(groupSensors(preset, { moment: 'message' })), [['scene']]);
+
+        const measured = new Set(ids(preset));
+        const off = ['change', 'world', 'closeness', 'house', 'picture_striking', 'picture_now', 'mood'];
+        assert.deepEqual(off.filter(id => measured.has(id)), []);
     });
 
     it('adds a sensor that is watched and drops one whose rule is turned off', () => {
         const preset = builtInPreset();
         preset.sensors.find(sensor => sensor.id === 'world').watch = true;
         preset.rules.find(rule => rule.id === 'drift').enabled = false;
-        assert.deepEqual(ids(preset), ['change', 'tension', 'repeats', 'world']);
+        assert.deepEqual(ids(preset), ['cost', 'speaks', 'repeats', 'world', 'scene', 'attention']);
     });
 
     it('counts a sensor that only an unless condition names', () => {
@@ -49,8 +63,15 @@ describe('which sensors are measured', () => {
 
     it('leaves out a sensor that cannot be asked', () => {
         const preset = builtInPreset();
-        preset.sensors.find(sensor => sensor.id === 'change').question = '  ';
-        assert.deepEqual(ids(preset), ['tension', 'repeats', 'tone']);
+        preset.sensors.find(sensor => sensor.id === 'cost').question = '  ';
+        assert.deepEqual(ids(preset), ['tension', 'speaks', 'repeats', 'tone', 'scene', 'attention']);
+    });
+
+    it('leaves out a sensor that reads no message at all', () => {
+        assert.equal(hasInput(sensor({ user: 0, assistant: 0 })), false);
+        assert.deepEqual(ids(presetOf(sensor({ user: 0, assistant: 0 }))), []);
+        assert.deepEqual(ids(presetOf(sensor({ user: 0, assistant: 1 }))), ['a']);
+        assert.deepEqual(ids(presetOf(sensor({ user: 1, assistant: 0 }))), ['a']);
     });
 
     it('needs two options before it asks a choice sensor, and asks a yes or no sensor with none', () => {
@@ -59,6 +80,51 @@ describe('which sensors are measured', () => {
         assert.deepEqual(ids(presetOf(one)), []);
         assert.deepEqual(ids(presetOf(two)), ['mood']);
         assert.deepEqual(ids(presetOf(sensor({ id: 'danger', type: 'noul', levels: [] }))), ['danger']);
+    });
+});
+
+describe('when a sensor runs', () => {
+    it('runs before the reply only when it asks for no assistant message', () => {
+        assert.equal(momentOf(sensor({ user: 1, assistant: 0 })), 'message');
+        assert.equal(momentOf(sensor({ user: 0, assistant: 1 })), 'reply');
+        assert.equal(momentOf(sensor({ user: 4, assistant: 1 })), 'reply');
+        assert.equal(momentOf(sensor({ user: 0, assistant: 0 })), 'message');
+    });
+
+    it('takes the reply moment unless every sensor a rule reads runs before the reply', () => {
+        const sensors = [
+            sensor({ id: 'scene', user: 1, assistant: 0 }),
+            sensor({ id: 'mood', user: 1, assistant: 0 }),
+            sensor({ id: 'tone', user: 0, assistant: 1 }),
+        ];
+        const rule = (...used) => ({ conditions: used.map(id => ({ sensor: id, op: 'below', value: 1 })) });
+        assert.equal(momentOfRule(rule('scene'), sensors), 'message');
+        assert.equal(momentOfRule(rule('scene', 'mood'), sensors), 'message');
+        assert.equal(momentOfRule(rule('scene', 'tone'), sensors), 'reply');
+        assert.equal(momentOfRule(rule('tone'), sensors), 'reply');
+    });
+
+    it('counts the exception sensor and an unknown sensor as a reply sensor', () => {
+        const sensors = [sensor({ id: 'scene', user: 1, assistant: 0 }), sensor({ id: 'tone', user: 0, assistant: 1 })];
+        const gated = {
+            conditions: [{ sensor: 'scene', op: 'is', value: 'x' }],
+            skipWhen: { sensor: 'tone', op: 'below', value: 1 },
+        };
+        assert.equal(momentOfRule(gated, sensors), 'reply');
+        assert.equal(momentOfRule({ conditions: [{ sensor: 'gone', op: 'below', value: 1 }] }, sensors), 'reply');
+        assert.equal(momentOfRule({ conditions: [] }, sensors), 'reply');
+    });
+});
+
+describe('the labels a sensor produces', () => {
+    it('names only the labels its settings fill', () => {
+        assert.deepEqual(labelsFor(sensor({ user: 1, assistant: 1 })), ['latest_turn', 'player_message']);
+        assert.deepEqual(labelsFor(sensor({ user: 0, assistant: 1 })), ['latest_turn']);
+        assert.deepEqual(labelsFor(sensor({ user: 1, assistant: 0 })), ['player_message']);
+        assert.deepEqual(labelsFor(sensor({ user: 0, assistant: 5 })), ['latest_turn', 'history']);
+        assert.deepEqual(labelsFor(sensor({ user: 3, assistant: 0 })), ['player_message', 'history']);
+        assert.deepEqual(labelsFor(sensor({ user: 0, assistant: 1, context: true })), ['latest_turn', 'context']);
+        assert.deepEqual(labelsFor(sensor({ user: 0, assistant: 0 })), []);
     });
 });
 
@@ -89,30 +155,34 @@ describe('grouping sensors into calls', () => {
     it('gives every distinct set of reading settings its own call', () => {
         const groups = groupSensors(presetOf(
             sensor({ id: 'a' }),
-            sensor({ id: 'b', turns: 5, includeUser: false }),
-            sensor({ id: 'c', turns: 5, includeUser: false, includeContext: true }),
+            sensor({ id: 'b', user: 0, assistant: 5 }),
+            sensor({ id: 'c', user: 0, assistant: 5, context: true }),
             sensor({ id: 'd' }),
         ));
         assert.deepEqual(keys(groups), [['a', 'd'], ['b'], ['c']]);
     });
 
-    it('shares one call between sensors that differ only in how often they run', () => {
+    it('shares one call between sensors with the same three settings', () => {
         const groups = groupSensors(presetOf(
-            sensor({ id: 'a', measureEvery: 1 }),
-            sensor({ id: 'b', measureEvery: 3 }),
-        ), { due: 3 });
+            sensor({ id: 'a', user: 2, assistant: 3, context: true }),
+            sensor({ id: 'b', user: 2, assistant: 3, context: true }),
+        ));
         assert.deepEqual(keys(groups), [['a', 'b']]);
     });
 
-    it('leaves out a sensor that is not due on this reply', () => {
-        const preset = presetOf(sensor({ id: 'a', measureEvery: 1 }), sensor({ id: 'b', measureEvery: 3 }));
-        assert.deepEqual(keys(groupSensors(preset, { due: 2 })), [['a']]);
-        assert.deepEqual(keys(groupSensors(preset, { due: 3 })), [['a', 'b']]);
-        assert.deepEqual(groupSensors(presetOf(sensor({ id: 'b', measureEvery: 3 })), { due: 2 }), []);
+    it('keeps the two moments in separate calls and asks for one moment at a time', () => {
+        const preset = presetOf(
+            sensor({ id: 'scene', user: 1, assistant: 0 }),
+            sensor({ id: 'mood', user: 1, assistant: 0 }),
+            sensor({ id: 'tone', user: 0, assistant: 1 }),
+        );
+        assert.deepEqual(keys(groupSensors(preset, { moment: 'message' })), [['scene', 'mood']]);
+        assert.deepEqual(keys(groupSensors(preset, { moment: 'reply' })), [['tone']]);
+        assert.deepEqual(keys(groupSensors(preset)), [['scene', 'mood'], ['tone']]);
     });
 
     it('narrows the call to the sensors it is asked for', () => {
-        const preset = presetOf(sensor({ id: 'a' }), sensor({ id: 'b' }), sensor({ id: 'c', turns: 4 }));
+        const preset = presetOf(sensor({ id: 'a' }), sensor({ id: 'b' }), sensor({ id: 'c', assistant: 4 }));
         assert.deepEqual(keys(groupSensors(preset, { only: new Set(['b', 'c']) })), [['b'], ['c']]);
         assert.deepEqual(groupSensors(preset, { only: new Set() }), []);
     });
@@ -134,7 +204,7 @@ describe('grouping sensors into calls', () => {
     });
 
     it('gives the same key to two requests that ask for the same thing', () => {
-        const preset = presetOf(sensor({ id: 'a' }), sensor({ id: 'b' }), sensor({ id: 'c', turns: 4 }));
+        const preset = presetOf(sensor({ id: 'a' }), sensor({ id: 'b' }), sensor({ id: 'c', assistant: 4 }));
         const all = groupSensors(preset).map(groupSpec);
         assert.equal(requestKey(all), requestKey([...all].reverse()));
         assert.notEqual(requestKey(all), requestKey(groupSensors(preset, { only: new Set(['c']) }).map(groupSpec)));
@@ -148,7 +218,7 @@ describe('grouping sensors into calls', () => {
     });
 });
 
-describe('the turn text a call carries', () => {
+describe('the text a call carries at the reply moment', () => {
     const chat = [user('u0'), narrator('c0'), user('u1'), narrator('c1'), narrator('c2'), user('u2'), narrator('c3')];
     const build = (index, overrides, context = null) => {
         const [group] = groupSensors(presetOf(sensor(overrides)));
@@ -156,71 +226,83 @@ describe('the turn text a call carries', () => {
     };
 
     it('sends one reply with the message before it', () => {
-        assert.deepEqual(build(3, { turns: 1, includeUser: true }), { player_message: 'u1', latest_turn: 'c1' });
+        assert.deepEqual(build(3, { user: 1, assistant: 1 }), { latest_turn: 'c1', player_message: 'u1' });
     });
 
-    it('sends one reply alone when your messages are left out', () => {
-        assert.deepEqual(build(3, { turns: 1, includeUser: false }), { latest_turn: 'c1' });
+    it('sends one reply alone when no user message is asked for', () => {
+        assert.deepEqual(build(3, { user: 0, assistant: 1 }), { latest_turn: 'c1' });
     });
 
-    it('joins several replies with a blank line, oldest first', () => {
-        assert.deepEqual(build(6, { turns: 3, includeUser: false }), { latest_turns: 'c1\n\nc2\n\nc3' });
+    it('puts the older replies in history, oldest first, with a speaker line', () => {
+        assert.deepEqual(build(6, { user: 0, assistant: 3 }), {
+            latest_turn: 'c3',
+            history: 'Narrator:\nc1\n\nNarrator:\nc2',
+        });
     });
 
-    it('labels each turn when your messages come along', () => {
-        assert.deepEqual(build(3, { turns: 2, includeUser: true }), {
-            latest_turns: 'Player:\nu0\n\nNarrator:\nc0\n\n---\n\nPlayer:\nu1\n\nNarrator:\nc1',
+    it('mixes older replies and older messages into one history in chat order', () => {
+        assert.deepEqual(build(3, { user: 2, assistant: 2 }), {
+            latest_turn: 'c1',
+            player_message: 'u1',
+            history: 'Player:\nu0\n\nNarrator:\nc0',
         });
     });
 
     it('repeats the one message before two replies in a row', () => {
-        assert.deepEqual(build(4, { turns: 2, includeUser: true }), {
-            latest_turns: 'Player:\nu1\n\nNarrator:\nc1\n\n---\n\nPlayer:\nu1\n\nNarrator:\nc2',
-        });
+        assert.deepEqual(build(4, { user: 1, assistant: 1 }), { latest_turn: 'c2', player_message: 'u1' });
     });
 
     it('never reaches past the reply it is measuring', () => {
-        assert.deepEqual(build(3, { turns: 10, includeUser: false }), { latest_turns: 'c0\n\nc1' });
+        assert.deepEqual(build(3, { user: 0, assistant: 10 }), {
+            latest_turn: 'c1',
+            history: 'Narrator:\nc0',
+        });
     });
 
     it('takes a greeting with no message before it', () => {
         const greeting = [narrator('hello there'), user('u0'), narrator('c0')];
-        const [group] = groupSensors(presetOf(sensor({ turns: 2, includeUser: true })));
+        const [group] = groupSensors(presetOf(sensor({ user: 2, assistant: 2 })));
         assert.deepEqual(buildRequest(greeting, 2, group, null, substitute).state, {
-            latest_turns: 'Player:\n\n\nNarrator:\nhello there\n\n---\n\nPlayer:\nu0\n\nNarrator:\nc0',
+            latest_turn: 'c0',
+            player_message: 'u0',
+            history: 'Narrator:\nhello there',
         });
-        assert.deepEqual(build(1, { turns: 1, includeUser: true }), { player_message: 'u0', latest_turn: 'c0' });
     });
 
-    it('asks for fewer turns than the chat holds', () => {
+    it('asks for more messages than the chat holds', () => {
         const short = [user('u0'), narrator('c0')];
-        const [group] = groupSensors(presetOf(sensor({ turns: 5, includeUser: false })));
-        assert.deepEqual(buildRequest(short, 1, group, null, substitute).state, { latest_turns: 'c0' });
+        const [group] = groupSensors(presetOf(sensor({ user: 0, assistant: 5 })));
+        assert.deepEqual(buildRequest(short, 1, group, null, substitute).state, { latest_turn: 'c0' });
     });
 
     it('adds the context only to a sensor that asked for it', () => {
         const context = { description: 'a knight' };
-        assert.deepEqual(build(3, { turns: 1, includeContext: true }, context).context, context);
-        assert.equal(build(3, { turns: 1, includeContext: false }, context).context, undefined);
-        assert.deepEqual(build(3, { turns: 1, includeContext: true }, {}).context, {});
+        assert.deepEqual(build(3, { context: true }, context).context, context);
+        assert.equal(build(3, { context: false }, context).context, undefined);
+        assert.deepEqual(build(3, { context: true }, {}).context, {});
     });
 });
 
-describe('which scores carry forward', () => {
-    it('carries a sensor that reads several turns', () => {
-        assert.deepEqual(carryForwardIds(presetOf(sensor({ id: 'slow', turns: 5 }))), ['slow']);
+describe('the text a call carries at the message moment', () => {
+    const chat = [user('u0'), narrator('c0'), user('u1'), narrator('c1'), user('u2')];
+    const build = (index, overrides) => {
+        const [group] = groupSensors(presetOf(sensor(overrides)));
+        return buildRequest(chat, index, group, null, substitute).state;
+    };
+
+    it('sends the judged message on its own', () => {
+        assert.deepEqual(build(4, { user: 1, assistant: 0 }), { player_message: 'u2' });
     });
 
-    it('carries a sensor that is measured now and then', () => {
-        assert.deepEqual(carryForwardIds(presetOf(sensor({ id: 'rare', measureEvery: 4 }))), ['rare']);
+    it('puts the earlier messages in history and never reaches a reply', () => {
+        assert.deepEqual(build(4, { user: 3, assistant: 0 }), {
+            player_message: 'u2',
+            history: 'Player:\nu0\n\nPlayer:\nu1',
+        });
     });
 
-    it('never carries a one-turn sensor that runs on every reply', () => {
-        assert.deepEqual(carryForwardIds(presetOf(sensor({ id: 'fast' }))), []);
-    });
-
-    it('carries the story and repeats sensors of the built-in preset and not the reply ones', () => {
-        const preset = builtInPreset();
-        assert.deepEqual(carryForwardIds(preset), ['repeats', 'tone']);
+    it('sends nothing at all when both counts are zero', () => {
+        const [group] = groupSensors(presetOf(sensor({ user: 0, assistant: 0 })));
+        assert.equal(group, undefined);
     });
 });

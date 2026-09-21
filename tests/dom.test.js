@@ -4,7 +4,7 @@ import { installDom } from './helpers/dom.js';
 
 installDom();
 
-const { activate, activates, button, busy, node, slider, withReason } = await import('../src/ui/dom.js');
+const { activate, activates, button, busy, node, resultsBox, slider, withReason } = await import('../src/ui/dom.js');
 
 const click = { type: 'click' };
 const key = name => ({ type: 'keydown', key: name });
@@ -157,5 +157,20 @@ describe('a button that cannot be pressed', () => {
         const target = button('Measure', 'Score the replies', () => {});
         assert.equal(withReason(target, ''), target);
         assert.equal(target.disabled, false);
+    });
+});
+
+describe('a results row', () => {
+    it('puts the full text under the excerpt, and only when there is more to show', () => {
+        const box = resultsBox();
+        box.show('', [
+            { index: 3, tag: '2.4', text: 'A long reply...', full: 'A long reply that goes on.' },
+            { index: 4, tag: '1.0', text: 'Short.', full: 'Short.' },
+        ]);
+        const [long, short] = box.element.querySelectorAll('.jeved-try-row');
+        assert.equal(long.querySelector('.jeved-try-full').textContent, 'A long reply that goes on.');
+        assert.equal(long.querySelector('.jeved-try-text').textContent, 'A long reply...');
+        assert.equal(short.querySelector('.jeved-try-full'), null);
+        assert.equal(short.querySelector('.jeved-try-text').textContent, 'Short.');
     });
 });

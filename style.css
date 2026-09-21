@@ -358,15 +358,20 @@
 }
 
 .jeved-try-row {
-    display: grid;
-    grid-template-columns: 110px minmax(0, 1fr);
-    align-items: center;
-    gap: 8px;
-    padding: 3px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+}
+
+.jeved-try-row:last-child {
+    border-bottom: 0;
 }
 
 .jeved-try-mark {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 6px;
     min-width: 0;
@@ -384,6 +389,24 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+}
+
+.jeved-try-more > summary {
+    cursor: pointer;
+}
+
+.jeved-try-more[open] > summary {
+    white-space: normal;
+    opacity: 0.5;
+}
+
+.jeved-try-full {
+    margin-top: 4px;
+    max-height: 220px;
+    overflow-y: auto;
+    font-size: 0.8em;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
 
 .jeved-try-empty {
@@ -648,6 +671,7 @@
 }
 
 .jeved-list-row {
+    flex: 0 0 auto;
     display: flex;
     align-items: center;
     gap: 5px;
@@ -661,6 +685,14 @@
 
 .jeved-list-row:hover {
     border-color: var(--SmartThemeBorderColor);
+}
+
+.jeved-list-row--off {
+    opacity: 0.45;
+}
+
+.jeved-list-row--fire {
+    border-color: var(--active);
 }
 
 .jeved-list-row--on {
@@ -686,6 +718,11 @@
     font-size: 0.8em;
     white-space: nowrap;
     opacity: 0.6;
+}
+
+.jeved-rule-moment {
+    display: flex;
+    gap: 6px;
 }
 
 .jeved-rule-status--fire {
@@ -717,7 +754,9 @@
     font-size: 0.8em;
     line-height: 1.3;
     opacity: 0.7;
-    overflow-wrap: anywhere;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .jeved-rule-note {
@@ -726,15 +765,7 @@
 }
 
 .jeved-sensor-note {
-    grid-column: 1;
-}
-
-.jeved-sensor-watch {
-    grid-column: 2;
-    justify-self: end;
-    margin: 0;
-    font-size: 0.8em;
-    white-space: nowrap;
+    grid-column: 1 / -1;
 }
 
 .jeved-rule-name,
@@ -749,10 +780,13 @@
 .jeved-sensor-score {
     grid-column: 2;
     justify-self: end;
-    width: 70px;
+    max-width: 170px;
     font-size: 0.85em;
     font-variant-numeric: tabular-nums;
     text-align: right;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     opacity: 0.7;
 }
 
@@ -818,7 +852,7 @@
 
 .jeved-strip-row {
     display: grid;
-    grid-template-columns: 150px 1fr;
+    grid-template-columns: minmax(150px, 230px) 1fr;
     gap: 8px;
     align-items: center;
 }
@@ -835,14 +869,20 @@
 }
 
 .jeved-strip-name {
+    flex: 0 1 auto;
+    min-width: 60%;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 
 .jeved-strip-rule {
+    flex: 1 1 0;
+    min-width: 0;
     font-size: 0.85em;
     color: var(--golden);
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .jeved-strip-cells {
@@ -887,10 +927,6 @@
     opacity: 0.3;
 }
 
-.jeved-cell--carried {
-    opacity: 0.45;
-    font-style: italic;
-}
 
 .jeved-cell--on {
     background-color: color-mix(in srgb, var(--golden) 28%, transparent);
@@ -1040,10 +1076,6 @@
 
     .jeved-try-note {
         flex-basis: 100%;
-    }
-
-    .jeved-try-row {
-        grid-template-columns: 78px minmax(0, 1fr);
     }
 
     .jeved-field-grid {

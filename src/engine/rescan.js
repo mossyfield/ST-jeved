@@ -1,4 +1,4 @@
-import { holdRescan, isRescanning, measure } from './measure.js';
+import { PARTIAL, holdRescan, isRescanning, measure } from './measure.js';
 import { measureBlockReason, notify } from './status.js';
 
 const RESCAN_CONCURRENCY = 2;
@@ -17,10 +17,11 @@ export async function rescan(tasks, onProgress = null) {
     const workers = Array.from({ length: Math.min(RESCAN_CONCURRENCY, queue.length) }, async () => {
         while (queue.length && !controller.signal.aborted && !measureBlockReason()) {
             const outcome = await measure(queue.shift(), controller.signal);
-            if (counts[outcome] === undefined) {
+            const bucket = outcome === PARTIAL ? 'failed' : outcome;
+            if (counts[bucket] === undefined) {
                 counts.skipped++;
             } else {
-                counts[outcome]++;
+                counts[bucket]++;
             }
             done++;
             onProgress?.(done, tasks.length);

@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { badgeFor, bandText, decisionSentence, excerpt, levelText, listPhrase, previewSentence, questionKeysHint, readsTag, rescanSentence, ruleBrief, ruleProblem, ruleSummary, scoreLine, sensorProblem, stripChart, tokenWords } from '../src/describe.js';
+import { badgeFor, bandText, decisionSentence, excerpt, levelText, listPhrase, momentLine, momentTag, previewSentence, questionKeysHint, rescanSentence, ruleMomentNote, ruleProblem, ruleSummary, scoreLine, sensorProblem, stripChart, tokenWords } from '../src/describe.js';
 import { conditionShort, conditionText, sensorLabel, valueText } from '../src/sensor-types.js';
-import { scoreText } from '../src/util.js';
+import { hashText, scoreText } from '../src/util.js';
 
 const sensors = [
-    { id: 'tone', label: 'Tone', turns: 5, includeContext: true, levels: ['Zero.', 'One.', 'Two.', 'Three.', 'Four.'] },
-    { id: 'tension', label: 'Tension', turns: 1, includeUser: true, levels: ['None.', 'Mild.', 'Clear.', 'High.', 'Extreme.'] },
-    { id: 'bare', label: '', turns: 1, levels: [] },
+    { id: 'tone', label: 'Tone', user: 0, assistant: 5, context: true, levels: ['Zero.', 'One.', 'Two.', 'Three.', 'Four.'] },
+    { id: 'tension', label: 'Tension', user: 1, assistant: 1, levels: ['None.', 'Mild.', 'Clear.', 'High.', 'Extreme.'] },
+    { id: 'bare', label: '', user: 1, assistant: 1, levels: [] },
+    { id: 'scene', label: 'Scene', user: 1, assistant: 0, levels: ['Zero.', 'One.', 'Two.', 'Three.', 'Four.'] },
 ];
 
 const typed = [
@@ -57,31 +58,42 @@ describe('words for one value', () => {
         assert.equal(levelText(sensors[2], 1), '');
     });
 
-    it('tags a row with what the sensor reads', () => {
-        assert.equal(readsTag({ turns: 1 }), '1 reply');
-        assert.equal(readsTag({ turns: 5 }), '5 replies');
-        assert.equal(readsTag({ turns: 5, includeContext: true }), '5 replies + context');
-        assert.equal(readsTag({}), '1 reply');
+    it('tags a row with the moment the sensor runs at', () => {
+        assert.equal(momentTag('reply'), 'After the reply');
+        assert.equal(momentTag('message'), 'Before the reply');
+        assert.equal(ruleMomentNote('message'), 'This rule acts on the reply that comes next.');
+        assert.equal(ruleMomentNote('reply'), 'This rule acts on your next turn.');
+        assert.equal(ruleMomentNote('reply', 'after-reply'), 'This rule acts right after the reply.');
+    });
+
+    it('says when a sensor runs, and asks for a message when it reads none', () => {
+        assert.equal(momentLine({ user: 1, assistant: 1 }), 'Runs after each reply.');
+        assert.equal(momentLine({ user: 1, assistant: 0 }), 'Runs before the reply, on your message.');
+        assert.equal(momentLine({ user: 0, assistant: 0 }), 'Pick at least one message.');
     });
 
     it('names only the keys the current settings produce', () => {
-        assert.equal(questionKeysHint({ turns: 1 }), 'Refer to the reply as `latest_turn`.');
+        assert.equal(questionKeysHint({ user: 0, assistant: 1 }), 'Refer to the reply as `latest_turn`.');
         assert.equal(
-            questionKeysHint({ turns: 1, includeUser: true }),
+            questionKeysHint({ user: 1, assistant: 1 }),
             'Refer to the reply as `latest_turn` and your message as `player_message`.',
         );
         assert.equal(
-            questionKeysHint({ turns: 1, includeUser: true, includeContext: true }),
+            questionKeysHint({ user: 1, assistant: 1, context: true }),
             'Refer to the reply as `latest_turn`, your message as `player_message`, and the card and prompts as `context`.',
         );
     });
 
-    it('never names your message when Jev reads several replies at once', () => {
-        assert.equal(questionKeysHint({ turns: 4, includeUser: true }), 'Refer to the replies as `latest_turns`.');
+    it('names history once the sensor asks for more than one message of a kind', () => {
         assert.equal(
-            questionKeysHint({ turns: 4, includeUser: true, includeContext: true }),
-            'Refer to the replies as `latest_turns` and the card and prompts as `context`.',
+            questionKeysHint({ user: 0, assistant: 4 }),
+            'Refer to the reply as `latest_turn` and the earlier messages as `history`.',
         );
+        assert.equal(
+            questionKeysHint({ user: 3, assistant: 0, context: true }),
+            'Refer to your message as `player_message`, the earlier messages as `history`, and the card and prompts as `context`.',
+        );
+        assert.equal(questionKeysHint({ user: 0, assistant: 0 }), '');
     });
 
     it('rounds a token count into words', () => {
@@ -169,65 +181,31 @@ describe('words for a sensor of each type', () => {
     });
 });
 
-describe('ruleBrief', () => {
-    it('names the action and the condition', () => {
-        assert.equal(ruleBrief(rule(), sensors), 'Nudge · Tone below 1.5');
-        assert.equal(ruleBrief(rule({ action: 'swipe' }), sensors), 'Reroll · Tone below 1.5');
-    });
-
-    it('joins several conditions with a comma', () => {
-        const both = rule({ conditions: [
-            { sensor: 'tone', op: 'below', value: 2 },
-            { sensor: 'tension', op: 'below', value: 2 },
-        ] });
-        assert.equal(ruleBrief(both, sensors), 'Nudge · Tone below 2, Tension below 2');
-    });
-
-    it('leaves the window counts, the cooldown and the exception out', () => {
-        const busy = rule({ need: 4, window: 9, cooldown: 5, skipWhen: { sensor: 'tension', op: 'above', value: 3 } });
-        assert.equal(ruleBrief(busy, sensors), 'Nudge · Tone below 1.5');
-    });
-
-    it('marks a rule that runs a script', () => {
-        assert.equal(ruleBrief(rule({ script: '/echo hi' }), sensors), 'Nudge · Tone below 1.5 · Script');
-    });
-
-    it('says the action alone when the rule has no condition, and nothing for no rule', () => {
-        assert.equal(ruleBrief(rule({ conditions: [] }), sensors), 'Nudge');
-        assert.equal(ruleBrief(null, sensors), '');
-    });
-
-    it('says the action is unknown rather than leaving the line bare', () => {
-        assert.equal(ruleBrief(rule({ action: 'teleport' }), sensors), 'Unknown action · Tone below 1.5');
-    });
-});
-
 describe('scoreLine', () => {
     it('writes the name, the score and the words of one sensor', () => {
         assert.equal(scoreLine(sensors[1], 2.44, { words: 'Clear.' }), 'Tension: 2.4 - Clear.');
         assert.equal(scoreLine(sensors[1], 3), 'Tension: 3');
     });
 
-    it('marks a score that was carried over and falls back to the id', () => {
-        assert.equal(scoreLine(sensors[1], 1, { words: 'Mild.', carried: true }), 'Tension: 1 - Mild. (carried over)');
+    it('falls back to the id when the sensor has no name', () => {
         assert.equal(scoreLine(sensors[2], null), 'bare: not measured');
     });
 });
 
 describe('rescanSentence', () => {
     it('reports the successes on their own when nothing failed', () => {
-        assert.equal(rescanSentence({ measured: 1, failed: 0 }), 'Measured 1 reply.');
-        assert.equal(rescanSentence({ measured: 12, failed: 0 }), 'Measured 12 replies.');
+        assert.equal(rescanSentence({ measured: 1, failed: 0 }), 'Measured 1 message.');
+        assert.equal(rescanSentence({ measured: 12, failed: 0 }), 'Measured 12 messages.');
     });
 
     it('names the failures beside the successes', () => {
-        assert.equal(rescanSentence({ measured: 3, failed: 2 }), 'Measured 3 replies, and 2 failed.');
-        assert.equal(rescanSentence({ measured: 1, failed: 1 }), 'Measured 1 reply, and 1 failed.');
+        assert.equal(rescanSentence({ measured: 3, failed: 2 }), 'Measured 3 messages, and 2 failed.');
+        assert.equal(rescanSentence({ measured: 1, failed: 1 }), 'Measured 1 message, and 1 failed.');
     });
 
     it('says why nothing was measured when every call failed', () => {
-        assert.equal(rescanSentence({ measured: 0, failed: 4 }), 'Nothing was measured, because 4 replies failed.');
-        assert.equal(rescanSentence({ measured: 0, failed: 1 }), 'Nothing was measured, because 1 reply failed.');
+        assert.equal(rescanSentence({ measured: 0, failed: 4 }), 'Nothing was measured, because 4 messages failed.');
+        assert.equal(rescanSentence({ measured: 0, failed: 1 }), 'Nothing was measured, because 1 message failed.');
     });
 
     it('says nothing happened when the scan was stopped or skipped', () => {
@@ -302,22 +280,21 @@ describe('bandText', () => {
 
 describe('stripChart', () => {
     const columns = [
-        { index: 2, scores: { tone: 1, tension: 3 }, own: { tone: 1, tension: 3 } },
-        { index: 4, scores: { tone: 1, tension: 1 }, own: { tension: 1 } },
-        { index: 6, scores: {}, own: {} },
+        { index: 2, scores: { tone: 1, tension: 3 } },
+        { index: 4, scores: { tone: 1, tension: 1 } },
+        { index: 6, scores: {} },
     ];
     const rules = [rule(), rule({ id: 'off', enabled: false, conditions: [{ sensor: 'tension', op: 'above', value: 3.5 }] })];
 
     it('builds one row per sensor with a cell per column', () => {
         const chart = stripChart({ columns, sensors, rules });
-        assert.deepEqual(chart.rows.map(row => row.id), ['tone', 'tension', 'bare']);
+        assert.deepEqual(chart.rows.map(row => row.id), ['tone', 'tension', 'bare', 'scene']);
         assert.equal(chart.rows[0].cells.length, 3);
         assert.deepEqual(chart.rows[0].cells.map(cell => cell.value), [1, 1, null]);
     });
 
-    it('marks a carried score and a missing one', () => {
+    it('marks a missing answer', () => {
         const [tone] = stripChart({ columns, sensors, rules }).rows;
-        assert.deepEqual(tone.cells.map(cell => cell.carried), [false, true, false]);
         assert.deepEqual(tone.cells.map(cell => cell.value === null), [false, false, true]);
     });
 
@@ -329,20 +306,19 @@ describe('stripChart', () => {
 
     it('accents a choice cell only where the tick matches it', () => {
         const picked = [
-            { index: 2, scores: { mood: 'calm' }, own: { mood: 'calm' } },
-            { index: 4, scores: { mood: 'angry' }, own: { mood: 'angry' } },
+            { index: 2, scores: { mood: 'calm' } },
+            { index: 4, scores: { mood: 'angry' } },
         ];
         const watch = [rule({ conditions: [{ sensor: 'mood', op: 'is', value: 'angry' }] })];
         const [row] = stripChart({ columns: picked, sensors: typed, rules: watch }).rows;
         assert.deepEqual(row.cells.map(cell => cell.matching), [false, true]);
         assert.deepEqual(row.cells.map(cell => cell.value), ['calm', 'angry']);
-        assert.deepEqual(row.cells.map(cell => cell.carried), [false, false]);
     });
 
     it('does not accent a cell whose confidence is below what the tick asks for', () => {
         const picked = [
-            { index: 2, scores: { tone: 1 }, own: { tone: 1 }, confidence: { tone: 0.9 } },
-            { index: 4, scores: { tone: 1 }, own: { tone: 1 }, confidence: {} },
+            { index: 2, scores: { tone: 1 }, confidence: { tone: 0.9 } },
+            { index: 4, scores: { tone: 1 }, confidence: {} },
         ];
         const sure = [rule({ conditions: [{ sensor: 'tone', op: 'below', value: 1.5, minConfidence: 0.8 }] })];
         const [row] = stripChart({ columns: picked, sensors, rules: sure }).rows;
@@ -425,6 +401,12 @@ describe('ruleSummary', () => {
         assert.match(ruleSummary(rule({ directive: '', script: '' }), sensors), /replies, do nothing\.$/);
     });
 
+    it('names the script action once and ignores the instruction it carries', () => {
+        assert.match(ruleSummary(rule({ action: 'script', script: '/echo hi' }), sensors), /replies, run its script\.$/);
+        assert.match(ruleSummary(rule({ action: 'script', directive: '(OOC)', script: '/echo hi' }), sensors), /replies, run its script\.$/);
+        assert.match(ruleSummary(rule({ action: 'script', script: '' }), sensors), /replies, do nothing\.$/);
+    });
+
     it('says when a rule names a sensor that is gone, or has no conditions', () => {
         const orphan = rule({ conditions: [{ sensor: 'tensoin', op: 'below', value: 1 }] });
         assert.equal(ruleSummary(orphan, sensors), 'This rule is skipped because no sensor is named tensoin.');
@@ -479,6 +461,11 @@ describe('decisionSentence', () => {
         assert.equal(decisionSentence(decision, rules), 'On message #12, Flat nudged the next turn, and Drift ran a script.');
     });
 
+    it('names a script action by its own words, with no instruction to show', () => {
+        const decision = { index: 6, fired: [{ rule: 'flat', action: 'script', reason: 'r' }] };
+        assert.equal(decisionSentence(decision, rules), 'On message #6, Flat ran its script.');
+    });
+
     it('names a swipe', () => {
         const decision = { index: 4, fired: [{ rule: 'flat', action: 'swipe', text: '(OOC)' }] };
         assert.equal(decisionSentence(decision, rules), 'On message #4, Flat rerolled the reply.');
@@ -486,7 +473,12 @@ describe('decisionSentence', () => {
 });
 
 describe('badgeFor', () => {
-    const user = (mes, fired) => ({ mes, is_user: true, extra: fired ? { jeved: { decided: true, fired } } : undefined });
+    const stamp = (mes, entries) => entries.map(entry => ({ ...entry, hash: hashText(mes) }));
+    const user = (mes, fired) => ({
+        mes,
+        is_user: true,
+        extra: fired ? { jeved: { decided: true, decidedHash: hashText(mes), fired: stamp(mes, fired) } } : undefined,
+    });
     const reply = (mes, swipeId) => (swipeId === undefined ? { mes } : { mes, swipe_id: swipeId });
 
     it('badges the user message that carried an instruction', () => {
@@ -495,6 +487,12 @@ describe('badgeFor', () => {
         assert.equal(item.kind, 'nudge');
         assert.equal(item.entries.length, 1);
         assert.equal(badgeFor(chat, 1), null);
+    });
+
+    it('does not badge an entry left over from the text before an edit', () => {
+        const chat = [user('hi', [{ rule: 'flat', action: 'nudge', text: '(OOC)' }]), reply('r')];
+        chat[0].mes = 'hi again';
+        assert.equal(badgeFor(chat, 0), null);
     });
 
     it('does not badge a user message whose rule only ran a script', () => {

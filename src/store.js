@@ -1,8 +1,10 @@
-import { actionOf } from './actions.js';
 import { hasValue } from './sensor-types.js';
 import { hashText, isRecord } from './util.js';
 
 const KEY = 'jeved';
+
+export const MESSAGE_MOMENT = 'message';
+export const REPLY_MOMENT = 'reply';
 
 export function currentChat() {
     return SillyTavern.getContext().chat;
@@ -12,7 +14,7 @@ export function isNarrator(message) {
     return !!message && !message.is_user && !message.is_system;
 }
 
-function isUser(message) {
+export function isUser(message) {
     return !!message && !!message.is_user && !message.is_system;
 }
 
@@ -28,12 +30,17 @@ export function getRecord(message) {
     return record && typeof record === 'object' ? record : null;
 }
 
-export function firedOf(record) {
+function firedOf(record) {
     return Array.isArray(record?.fired) ? record.fired : [];
 }
 
 export function fired(message) {
     return firedOf(getRecord(message));
+}
+
+export function firedFor(message) {
+    const hash = hashText(message?.mes);
+    return fired(message).filter(entry => entry?.hash === hash);
 }
 
 export function getScores(message) {
@@ -61,34 +68,48 @@ export function writeScores(message, scores, hash = hashText(message.mes), confi
     return extra[KEY];
 }
 
-export function lastUserIndex(chat, from = chat.length) {
-    for (let i = Math.min(from, chat.length) - 1; i >= 0; i--) {
-        if (isUser(chat[i])) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-export function narratorIndices(chat, { from = chat.length, limit = Infinity } = {}) {
+function foundIndices(chat, matches, from, limit) {
     const found = [];
     for (let i = Math.min(from, chat.length) - 1; i >= 0 && found.length < limit; i--) {
-        if (isNarrator(chat[i])) {
+        if (matches(chat[i])) {
             found.push(i);
         }
     }
     return found;
 }
 
-function measuredPairs(message, sensors) {
+export function narratorIndices(chat, { from = chat.length, limit = Infinity } = {}) {
+    return foundIndices(chat, isNarrator, from, limit);
+}
+
+export function userIndices(chat, { from = chat.length, limit = Infinity } = {}) {
+    return foundIndices(chat, isUser, from, limit);
+}
+
+export function lastUserIndex(chat, from = chat.length) {
+    const [found] = userIndices(chat, { from, limit: 1 });
+    return found === undefined ? -1 : found;
+}
+
+function sensorMap(sensors) {
+    const byId = new Map();
+    for (const sensor of sensors ?? []) {
+        if (!byId.has(sensor?.id)) {
+            byId.set(sensor?.id, sensor);
+        }
+    }
+    return byId;
+}
+
+function answersOf(message, byId) {
     const record = getScores(message);
     if (!record || !isRecord(record.scores)) {
-        return { values: null, confidence: {} };
+        return null;
     }
     const values = {};
     const confidence = {};
     for (const [id, value] of Object.entries(record.scores)) {
-        if (!hasValue(sensors.find(sensor => sensor?.id === id) ?? null, value)) {
+        if (!hasValue(byId.get(id) ?? null, value)) {
             continue;
         }
         values[id] = value;
@@ -100,55 +121,81 @@ function measuredPairs(message, sensors) {
     return { values, confidence };
 }
 
-function latestPairs(chat, ids, before, sensors) {
+export function latestScores(chat, ids, before = chat.length, sensors = []) {
+    const byId = sensorMap(sensors);
+    const wanted = new Set(ids);
     const values = {};
-    const confidence = {};
-    for (const index of narratorIndices(chat, { from: before })) {
-        const pairs = measuredPairs(chat[index], sensors);
-        for (const id of ids) {
-            if (values[id] === undefined && pairs.values?.[id] !== undefined) {
-                values[id] = pairs.values[id];
-                if (pairs.confidence[id] !== undefined) {
-                    confidence[id] = pairs.confidence[id];
-                }
+    for (let i = Math.min(before, chat.length) - 1; i >= 0 && wanted.size; i--) {
+        const stored = getScores(chat[i])?.scores;
+        if (!isRecord(stored)) {
+            continue;
+        }
+        for (const id of wanted) {
+            if (hasValue(byId.get(id) ?? null, stored[id])) {
+                values[id] = stored[id];
+                wanted.delete(id);
             }
         }
-        if (ids.every(id => values[id] !== undefined)) {
+    }
+    return values;
+}
+
+function entryOf({ index, replies, decides, own, shared }) {
+    const base = { index, replies, decides };
+    if (!own && !shared) {
+        return { ...base, scores: null, confidence: {} };
+    }
+    return {
+        ...base,
+        scores: { ...(shared?.values ?? {}), ...(own?.values ?? {}) },
+        confidence: { ...(shared?.confidence ?? {}), ...(own?.confidence ?? {}) },
+    };
+}
+
+export function getHistory(chat, count, moment = REPLY_MOMENT, sensors = []) {
+    const reply = moment === REPLY_MOMENT;
+    const byId = sensorMap(sensors);
+    const found = [];
+    const awaiting = [];
+    let replies = narratorIndices(chat).length;
+    let followsReply = false;
+
+    for (let index = chat.length - 1; index >= 0; index--) {
+        const message = chat[index];
+        const narrator = isNarrator(message);
+        if (narrator) {
+            replies--;
+        }
+        if (!narrator && !isUser(message)) {
+            continue;
+        }
+        if (!narrator && awaiting.length) {
+            const shared = answersOf(message, byId);
+            for (const record of awaiting) {
+                record.shared = shared;
+            }
+            awaiting.length = 0;
+        }
+        if (narrator === reply && found.length < count) {
+            const record = {
+                index,
+                replies,
+                decides: !reply || !followsReply,
+                own: answersOf(message, byId),
+                shared: null,
+            };
+            found.push(record);
+            if (reply) {
+                awaiting.push(record);
+            }
+        }
+        if (found.length >= count && !awaiting.length) {
             break;
         }
+        followsReply = narrator;
     }
-    return { values, confidence };
-}
 
-export function latestScores(chat, ids, before = chat.length, sensors = []) {
-    return latestPairs(chat, ids, before, sensors).values;
-}
-
-export function getHistory(chat, count, carryForwardIds = [], sensors = []) {
-    const indices = narratorIndices(chat, { limit: count }).reverse();
-    const history = indices.map(index => {
-        const pairs = measuredPairs(chat[index], sensors);
-        return { index, scores: pairs.values, own: pairs.values, confidence: pairs.confidence };
-    });
-    if (!carryForwardIds.length) {
-        return history;
-    }
-    const inherited = latestPairs(chat, carryForwardIds, indices[0] ?? chat.length, sensors);
-    for (const entry of history) {
-        for (const id of carryForwardIds) {
-            const value = entry.own?.[id];
-            if (value !== undefined) {
-                inherited.values[id] = value;
-                inherited.confidence[id] = entry.confidence[id];
-            } else if (inherited.values[id] !== undefined) {
-                entry.scores = { ...entry.scores, [id]: inherited.values[id] };
-                if (inherited.confidence[id] !== undefined) {
-                    entry.confidence = { ...entry.confidence, [id]: inherited.confidence[id] };
-                }
-            }
-        }
-    }
-    return history;
+    return found.reverse().map(record => entryOf(record));
 }
 
 export function repliesSince(chat, predicate, limit = Infinity) {
@@ -164,29 +211,53 @@ export function repliesSince(chat, predicate, limit = Infinity) {
     return narratorIndices(chat, { limit }).filter(index => index > found).length;
 }
 
-export function nudged(record) {
-    return firedOf(record).some(entry => !!actionOf(entry?.action)?.spaced && entry?.text);
+export function replyPosition(chat, index) {
+    return narratorIndices(chat, { from: index }).length;
 }
 
 export function firedRule(id) {
     return record => firedOf(record).some(entry => entry?.rule === id);
 }
 
-export function writeDecision(message, decision) {
+function asReceipt(entry) {
+    if (!entry || entry.text === undefined) {
+        return entry;
+    }
+    const kept = { ...entry };
+    delete kept.text;
+    return kept;
+}
+
+export function writeDecision(message, entries, hash = hashText(message.mes)) {
     const extra = ensureExtra(message);
-    extra[KEY] = { ...decision, decided: true, fired: firedOf(decision) };
+    const record = getRecord(message);
+    extra[KEY] = {
+        ...record,
+        decided: true,
+        decidedHash: hash,
+        fired: [...firedOf(record).map(asReceipt), ...entries.map(entry => ({ ...entry, hash }))],
+    };
     return extra[KEY];
 }
 
-export function addFired(message, entry) {
+export function addFired(message, entry, hash = hashText(message.mes)) {
     const extra = ensureExtra(message);
     const record = getRecord(message);
-    extra[KEY] = { ...record, decided: true, fired: [...firedOf(record), entry] };
+    extra[KEY] = {
+        ...record,
+        decided: true,
+        decidedHash: record?.decidedHash ?? hash,
+        fired: [...firedOf(record), { ...entry, hash }],
+    };
     return extra[KEY];
+}
+
+function newestEntry(message, ruleId) {
+    return fired(message).findLast(item => item?.rule === ruleId) ?? null;
 }
 
 export function setFiredValue(message, ruleId, key, value) {
-    const entry = fired(message).find(item => item?.rule === ruleId);
+    const entry = newestEntry(message, ruleId);
     if (!entry) {
         return false;
     }
@@ -195,7 +266,7 @@ export function setFiredValue(message, ruleId, key, value) {
 }
 
 export function stripFiredText(message, ruleId) {
-    const entry = fired(message).find(item => item?.rule === ruleId);
+    const entry = newestEntry(message, ruleId);
     if (!entry || entry.text === undefined) {
         return false;
     }
@@ -203,13 +274,34 @@ export function stripFiredText(message, ruleId) {
     return true;
 }
 
+function clearRecord(holder) {
+    const record = getRecord(holder);
+    if (!record || record.scores === undefined) {
+        return false;
+    }
+    const kept = { ...record };
+    delete kept.scores;
+    delete kept.hash;
+    delete kept.confidence;
+    if (Object.keys(kept).length) {
+        holder.extra[KEY] = kept;
+    } else {
+        delete holder.extra[KEY];
+    }
+    return true;
+}
+
 export function clearScores(chat) {
     let cleared = 0;
     for (const message of chat) {
-        if (isNarrator(message) && message?.extra?.[KEY]) {
-            delete message.extra[KEY];
-            cleared++;
+        if (!isNarrator(message) && !isUser(message)) {
+            continue;
         }
+        let changed = clearRecord(message);
+        for (const copy of Array.isArray(message.swipe_info) ? message.swipe_info : []) {
+            changed = clearRecord(copy) || changed;
+        }
+        cleared += changed ? 1 : 0;
     }
     return cleared;
 }

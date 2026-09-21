@@ -9,16 +9,22 @@ import { activate, column, node, text } from './dom.js';
 
 const BADGE_CLASS = 'jeved-badge';
 
+export function answersFor(chat, item) {
+    const stored = item.entries[0]?.scores;
+    if (stored && Object.keys(stored).length) {
+        return stored;
+    }
+    const own = getScores(chat[item.index])?.scores;
+    const source = narratorIndices(chat, { from: item.index, limit: 1 })[0];
+    const before = source === undefined ? null : getScores(chat[source])?.scores;
+    return own || before ? { ...before, ...own } : null;
+}
+
 function scoreLines(chat, item) {
     const preset = getPreset();
-    const stored = item.entries[0]?.scores;
-    let scores = stored && Object.keys(stored).length ? stored : null;
+    const scores = answersFor(chat, item);
     if (!scores) {
-        const source = narratorIndices(chat, { from: item.index, limit: 1 })[0];
-        scores = source === undefined ? null : getScores(chat[source])?.scores;
-    }
-    if (!scores) {
-        return ["Those scores aren't saved any more."];
+        return ["Those answers aren't saved any more."];
     }
     return preset.sensors
         .filter(sensor => hasValue(sensor, scores[sensor.id]))
@@ -37,7 +43,7 @@ async function openDetails(item) {
     if (action.badgeNote) {
         body.append(text('div', '', action.badgeNote));
     }
-    body.append(text('h4', 'jeved-section-title', 'Scores'));
+    body.append(text('h4', 'jeved-section-title', 'Answers'));
     for (const line of scoreLines(context.chat, item)) {
         body.append(text('div', 'jeved-detail-line', line));
     }

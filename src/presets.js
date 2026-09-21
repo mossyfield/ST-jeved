@@ -1,8 +1,9 @@
-import { actionIds, isKnownAction } from './actions.js';
+import { actionIds, isKnownAction, ruleAction } from './actions.js';
 import { CONTEXT_KEYS, groupsUpTo } from './context-groups.js';
 import { blankRule, blankSensor } from './defaults.js';
-import { TURNS } from './limits.js';
+import { MESSAGES, SCHEMA_VERSION } from './limits.js';
 import { DEFAULT_TYPE, confidenceLevel, isKnownType, typeIds, typeOf } from './sensor-types.js';
+import { NO_INPUT, hasInput, missesReplySensor, needsReplyProblem } from './sensors.js';
 import { clamp, isRecord } from './util.js';
 
 const quoted = ids => ids.map(id => `'${id}'`).join(' or ');
@@ -10,9 +11,10 @@ const quoted = ids => ids.map(id => `'${id}'`).join(' or ');
 const ACTION_LIST = quoted(actionIds());
 const TYPE_LIST = quoted(typeIds());
 
-export const SCHEMA_VERSION = 3;
-
 const UNSTAMPED_VERSION = 2;
+
+const TURNS_V1 = { min: 1, max: 50, fallback: 1 };
+const GAP_V3 = 5;
 
 const ID_PATTERN = /^[a-z0-9_]+$/;
 
@@ -98,14 +100,48 @@ function upgradeSensor(sensor, preset) {
     }
     const story = sensor.scope === 'story';
     delete sensor.scope;
-    sensor.turns = story ? clamp(preset.storyWindow, { ...TURNS, fallback: 5 }) : 1;
+    sensor.turns = story ? clamp(preset.storyWindow, { ...TURNS_V1, fallback: 5 }) : 1;
     sensor.includeContext = story;
     sensor.includeUser = !story;
-    sensor.measureEvery = story ? clamp(preset.storyEvery, TURNS) : 1;
+    sensor.measureEvery = story ? clamp(preset.storyEvery, TURNS_V1) : 1;
     sensor.question = renamed(sensor.question);
     if (Array.isArray(sensor.levels)) {
         sensor.levels = sensor.levels.map(level => renamed(level));
     }
+}
+
+const LATEST_TURNS = /`latest_turns`|\blatest_turns\b/g;
+const SPLIT_LABELS = '`history` and `latest_turn`';
+
+function upgradeInput(sensor) {
+    const turns = clamp(sensor.turns, TURNS_V1);
+    sensor.assistant = turns;
+    sensor.user = sensor.includeUser ? turns : 0;
+    sensor.context = !!sensor.includeContext;
+    delete sensor.turns;
+    delete sensor.includeUser;
+    delete sensor.includeContext;
+    delete sensor.measureEvery;
+}
+
+function upgradeWording(sensor) {
+    let changed = false;
+    const split = value => {
+        const before = String(value ?? '');
+        const after = before.replace(LATEST_TURNS, SPLIT_LABELS);
+        changed ||= after !== before;
+        return after;
+    };
+    sensor.question = split(sensor.question);
+    if (Array.isArray(sensor.levels)) {
+        sensor.levels = sensor.levels.map(level => split(level));
+    }
+    if (Array.isArray(sensor.options)) {
+        sensor.options = sensor.options.map(option => (isRecord(option)
+            ? { ...option, description: split(option.description) }
+            : option));
+    }
+    return changed;
 }
 
 const MIGRATIONS = new Map([
@@ -124,6 +160,29 @@ const MIGRATIONS = new Map([
                 sensor.type = DEFAULT_TYPE;
                 sensor.options = [];
             }
+        }
+    }],
+    [3, (preset, notices) => {
+        const reworded = [];
+        for (const sensor of Array.isArray(preset.sensors) ? preset.sensors : []) {
+            if (!isRecord(sensor)) {
+                continue;
+            }
+            upgradeInput(sensor);
+            if (upgradeWording(sensor)) {
+                reworded.push(String(sensor.label ?? '').trim() || String(sensor.id ?? ''));
+            }
+        }
+        const gap = Number.isFinite(Number(preset.gap)) ? Math.max(0, Math.round(Number(preset.gap))) : GAP_V3;
+        for (const rule of Array.isArray(preset.rules) ? preset.rules : []) {
+            if (isRecord(rule) && String(rule.directive ?? '').trim()) {
+                rule.cooldown = Math.max(Number(rule.cooldown) || 0, gap);
+            }
+        }
+        delete preset.gap;
+        delete preset.maxNudges;
+        if (reworded.length) {
+            notices.push(`Jeved 0.3 changed the wording of these sensors. Check: ${reworded.join(', ')}.`);
         }
     }],
 ]);
@@ -168,14 +227,17 @@ function historicalDefaults(preset, version) {
         .map(key => [key, stored[key] === undefined ? known.includes(key) : stored[key] === true]));
 }
 
-export function upgradePreset(preset) {
+export function upgradePreset(preset, notices = []) {
     if (!isRecord(preset) || presetVersion(preset) > SCHEMA_VERSION) {
         return preset;
     }
     const from = presetVersion(preset);
+    if (from >= SCHEMA_VERSION) {
+        return stampVersion(preset);
+    }
     historicalDefaults(preset, from);
     for (let version = from; version < SCHEMA_VERSION; version++) {
-        MIGRATIONS.get(version)?.(preset);
+        MIGRATIONS.get(version)?.(preset, notices);
     }
     return stampVersion(preset);
 }
@@ -241,11 +303,13 @@ export function validatePreset(data, { parse = null } = {}) {
             sensorIds.push(id);
             known.push(sensor);
         }
-        if (clamp(sensor.turns, TURNS) !== Number(sensor.turns)) {
-            problems.push(`${named}: turns must be a whole number from ${TURNS.min} to ${TURNS.max}`);
+        for (const [key, words] of [['user', 'user messages'], ['assistant', 'assistant messages']]) {
+            if (clamp(sensor[key], MESSAGES) !== Number(sensor[key])) {
+                problems.push(`${named}: ${words} must be a whole number from ${MESSAGES.min} to ${MESSAGES.max}`);
+            }
         }
-        if (clamp(sensor.measureEvery, TURNS) !== Number(sensor.measureEvery)) {
-            problems.push(`${named}: measure every must be a whole number from ${TURNS.min} to ${TURNS.max}`);
+        if (!hasInput(sensor)) {
+            problems.push(`${named}: ${NO_INPUT}`);
         }
         if (!String(sensor.label ?? '').trim()) {
             problems.push(`${named}: it has no name`);
@@ -281,17 +345,25 @@ export function validatePreset(data, { parse = null } = {}) {
         if (rule.action !== undefined && !isKnownAction(rule.action)) {
             problems.push(`${named}: the action must be ${ACTION_LIST}`);
         }
+        const action = ruleAction(rule);
         if (!Array.isArray(rule.conditions) || !rule.conditions.length) {
             problems.push(`${named}: it has no conditions`);
         } else {
             rule.conditions.forEach((condition, position) => {
                 checkCondition(condition, `${named}, condition ${position + 1}`, known, problems);
             });
+            if (missesReplySensor(rule, known)) {
+                problems.push(`${named}: ${needsReplyProblem(action.ruleNoun)}`);
+            }
         }
         if (rule.skipWhen !== null && rule.skipWhen !== undefined) {
             checkCondition(rule.skipWhen, `${named}, exception`, known, problems);
         }
-        if (!String(rule.directive ?? '').trim() && !String(rule.script ?? '').trim()) {
+        if (action?.needsScript) {
+            if (!String(rule.script ?? '').trim()) {
+                problems.push(`${named}: it needs a script`);
+            }
+        } else if (!String(rule.directive ?? '').trim() && !String(rule.script ?? '').trim()) {
             problems.push(`${named}: it needs an instruction or a script`);
         }
         const script = checkScript(rule.script, parse);
@@ -360,8 +432,6 @@ function knownFields(preset) {
             return kept;
         }),
         contextGroups: preset.contextGroups,
-        gap: preset.gap,
-        maxNudges: preset.maxNudges,
         jeved: SCHEMA_VERSION,
     });
 }
@@ -374,7 +444,8 @@ export function importPreset(data, taken = [], { parse = null } = {}) {
     if (version > SCHEMA_VERSION) {
         return { problems: [`A newer Jeved made this preset (file version ${version}), so Jeved did not import it.`] };
     }
-    const preset = upgradePreset(structuredClone(data));
+    const notices = [];
+    const preset = upgradePreset(structuredClone(data), notices);
     const problems = validatePreset(preset, { parse });
     if (problems.length) {
         return { problems };
@@ -384,6 +455,7 @@ export function importPreset(data, taken = [], { parse = null } = {}) {
         name: uniqueName(data.name, taken),
         preset: kept,
         disabled: kept.rules.filter(rule => String(rule.script ?? '').trim()).map(rule => rule.label || rule.id),
+        notices,
         problems: [],
     };
 }

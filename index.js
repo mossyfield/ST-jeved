@@ -1,5 +1,8 @@
 import { rescanSentence } from './src/describe.js';
-import { cancelRescan, forceRule, initEngine, isRescanning, measureBlockReason, onCharacterMessage, onChatChanged, planMeasurement, rescan, setPaused } from './src/engine.js';
+import { momentCount } from './src/sensors.js';
+import { MESSAGE_MOMENT } from './src/store.js';
+import { askOnce, cancelRescan, describeError, forceRule, initEngine, isRescanning, measureBlockReason, onCharacterMessage, onChatChanged, planMeasurement, rescan, setPaused } from './src/engine.js';
+import { answerText, askSensor, initMacros } from './src/macros.js';
 import { getPreset, initSettings } from './src/settings.js';
 import { toast } from './src/toast.js';
 import { initBadges, refreshBadges } from './src/ui/badge.js';
@@ -83,7 +86,7 @@ function addCommands() {
 
     context.SlashCommandParser.addCommandObject(context.SlashCommand.fromProps({
         name: 'jeved-pause',
-        helpString: 'Pause Jeved in this chat, or start it again. Jeved measures nothing while a chat is paused.',
+        helpString: 'Pause Jeved in this chat, or start it again. Jeved measures nothing while a chat is paused. /jeved-ask is a manual command and sends its one call in any case.',
         returns: 'boolean',
         unnamedArgumentList: [
             context.SlashCommandArgument.fromProps({
@@ -108,13 +111,92 @@ function addCommands() {
     }));
 
     context.SlashCommandParser.addCommandObject(context.SlashCommand.fromProps({
+        name: 'jeved-get',
+        helpString: 'Return the newest answer Jeved holds for one sensor in this chat. It makes no API call.',
+        returns: 'the answer, or an empty text',
+        unnamedArgumentList: [
+            context.SlashCommandArgument.fromProps({
+                description: 'the id of the sensor',
+                typeList: [context.ARGUMENT_TYPE.STRING],
+                isRequired: true,
+            }),
+        ],
+        callback: (_args, value) => answerText(value),
+    }));
+
+    context.SlashCommandParser.addCommandObject(context.SlashCommand.fromProps({
+        name: 'jeved-ask',
+        helpString: 'Ask Jev one question about the newest reply, or about your newest message when assistant is 0. It makes one API call and stores nothing.',
+        returns: 'the answer, or an empty text',
+        namedArgumentList: [
+            context.SlashCommandNamedArgument.fromProps({
+                name: 'type',
+                description: 'The sensor type to use.',
+                typeList: [context.ARGUMENT_TYPE.STRING],
+                isRequired: false,
+                defaultValue: 'noul',
+                enumList: ['score', 'choice', 'noul'].map(name => new context.SlashCommandEnumValue(name)),
+            }),
+            context.SlashCommandNamedArgument.fromProps({
+                name: 'options',
+                description: 'The options of a choice question, separated by commas.',
+                typeList: [context.ARGUMENT_TYPE.STRING],
+                isRequired: false,
+            }),
+            context.SlashCommandNamedArgument.fromProps({
+                name: 'levels',
+                description: 'The score descriptions, lowest first, separated by vertical bars.',
+                typeList: [context.ARGUMENT_TYPE.STRING],
+                isRequired: false,
+            }),
+            context.SlashCommandNamedArgument.fromProps({
+                name: 'user',
+                description: 'How many of your messages to send.',
+                typeList: [context.ARGUMENT_TYPE.NUMBER],
+                isRequired: false,
+                defaultValue: '0',
+            }),
+            context.SlashCommandNamedArgument.fromProps({
+                name: 'assistant',
+                description: 'How many replies to send. 0 asks about your newest message instead.',
+                typeList: [context.ARGUMENT_TYPE.NUMBER],
+                isRequired: false,
+                defaultValue: '1',
+            }),
+            context.SlashCommandNamedArgument.fromProps({
+                name: 'context',
+                description: 'Send the card and the prompts as well.',
+                typeList: [context.ARGUMENT_TYPE.STRING],
+                isRequired: false,
+                defaultValue: 'false',
+                enumList: [new context.SlashCommandEnumValue('true'), new context.SlashCommandEnumValue('false')],
+            }),
+        ],
+        unnamedArgumentList: [
+            context.SlashCommandArgument.fromProps({
+                description: 'the question or statement to ask',
+                typeList: [context.ARGUMENT_TYPE.STRING],
+                isRequired: true,
+            }),
+        ],
+        callback: async (args, value) => {
+            try {
+                return await askOnce(askSensor(args, value));
+            } catch (error) {
+                toast('error', describeError(error));
+                return '';
+            }
+        },
+    }));
+
+    context.SlashCommandParser.addCommandObject(context.SlashCommand.fromProps({
         name: 'jeved-rescan',
-        helpString: 'Measure the recent replies that have no score. Run the command again while it works to stop it.',
-        returns: 'the number of replies measured',
+        helpString: 'Measure the recent messages that have no answer. The count applies to your messages and to replies separately. Run the command again while it works to stop it.',
+        returns: 'the number of messages measured',
         namedArgumentList: [
             context.SlashCommandNamedArgument.fromProps({
                 name: 'count',
-                description: 'The number of recent replies to check.',
+                description: 'How many recent messages of each kind to check.',
                 typeList: [context.ARGUMENT_TYPE.NUMBER],
                 isRequired: false,
                 defaultValue: '20',
@@ -133,10 +215,10 @@ function addCommands() {
             const count = Math.max(1, Math.round(Number(args.count) || 20));
             const plan = planMeasurement({ limit: count });
             if (!plan.tasks.length) {
-                toast('info', 'Every recent reply is already measured.');
+                toast('info', 'Every recent message is already measured.');
                 return '0';
             }
-            if (!await ask(`Measure ${plan.tasks.length} replies? That costs ${plan.calls} API calls.`)) {
+            if (!await ask(`Measure ${momentCount(MESSAGE_MOMENT, plan.tasks.length)}? That costs ${plan.calls} API calls.`)) {
                 return '0';
             }
             const counts = await rescan(plan.tasks);
@@ -158,6 +240,7 @@ function addCommands() {
     });
 
     addCommands();
+    initMacros();
     addWandButton();
     addDrawer();
 })();

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { beforeEach, describe, it } from 'node:test';
+import { narrator, user } from './helpers/chat.js';
 import { buttonNamed, installDom, settle } from './helpers/dom.js';
 import { hostStub } from './helpers/host.js';
 
@@ -12,10 +13,12 @@ const { HOSTS } = await import('../src/classifier.js');
 const { CONFIDENCE } = await import('../src/limits.js');
 const { getPreset, getSettings, initSettings, normaliseSettings } = await import('../src/settings.js');
 const { addCost, addTokens } = await import('../src/engine/status.js');
-const { writeScores } = await import('../src/store.js');
+const { addFired, writeScores } = await import('../src/store.js');
+const { hashText } = await import('../src/util.js');
 const { changeProblems, optionChanges, optionNames, sensorsTab, spreadText } = await import('../src/ui/sensors-tab.js');
-const { conditionRow, latestLines } = await import('../src/ui/rules-tab.js');
+const { conditionRow, latestLines, rulesTab } = await import('../src/ui/rules-tab.js');
 const { activityTab } = await import('../src/ui/activity-tab.js');
+const { answersFor } = await import('../src/ui/badge.js');
 const { hostPicker } = await import('../src/ui/hosts.js');
 const { settingsTab } = await import('../src/ui/settings-tab.js');
 
@@ -26,14 +29,14 @@ const moods = () => [
 ];
 
 const choiceSensor = () => ({
-    id: 'mood', label: 'Mood', watch: true, type: 'choice', turns: 1, includeContext: false,
-    includeUser: true, measureEvery: 1, question: 'Which mood fits `latest_turn`?', levels: [],
+    id: 'mood', label: 'Mood', watch: true, type: 'choice', user: 1, assistant: 1, context: false,
+    question: 'Which mood fits `latest_turn`?', levels: [],
     options: moods(),
 });
 
 const scoreSensor = () => ({
-    id: 'tone', label: 'Tone', watch: true, type: 'score', turns: 1, includeContext: false,
-    includeUser: true, measureEvery: 1, question: 'How does `latest_turn` read?',
+    id: 'tone', label: 'Tone', watch: true, type: 'score', user: 1, assistant: 1, context: false,
+    question: 'How does `latest_turn` read?',
     levels: ['a', 'b', 'c', 'd', 'e'], options: [],
 });
 
@@ -52,7 +55,7 @@ function setup(rules = []) {
     initSettings();
     const settings = getSettings();
     settings.presets.Test = {
-        description: '', sensors: [choiceSensor(), scoreSensor()], rules, gap: 8, maxNudges: 1,
+        description: '', sensors: [choiceSensor(), scoreSensor()], rules,
     };
     settings.activePreset = 'Test';
     normaliseSettings(settings);
@@ -72,6 +75,18 @@ const problemText = tab => tab.element.querySelector('.jeved-problems').childNod
 const save = async tab => {
     buttonNamed(tab.element, 'Save').fire('click');
     await settle();
+};
+
+const drawn = () => {
+    const tab = activityTab({ refreshAll: () => {} });
+    body.replaceChildren(tab.element);
+    return tab;
+};
+
+const detailLines = (tab, at, className) => {
+    const cells = tab.element.querySelectorAll('.jeved-cell');
+    cells.at(at).fire('click', { type: 'click' });
+    return tab.element.querySelector('.jeved-detail').querySelectorAll(className).map(line => line.textContent);
 };
 
 describe('what changed in the option list of an open sensor', () => {
@@ -110,6 +125,32 @@ describe('saving a sensor that a rule reads', () => {
         const gone = name => changeProblems(preset, preset.sensors[0], choiceSensor(), { renames: new Map(), removed: [name] });
         assert.match(gone('calm')[0], /The option calm is used by Flat/);
         assert.deepEqual(gone('bored'), []);
+    });
+
+    it('refuses to take the assistant messages off a sensor an after-reply rule reads', () => {
+        const preset = setup([
+            { ...usingCalm(), id: 'puppet', label: 'Puppet', action: 'swipe' },
+        ]).presets.Test;
+        const early = { ...choiceSensor(), assistant: 0 };
+        const problems = changeProblems(preset, preset.sensors[0], early, { renames: new Map(), removed: [] });
+        assert.equal(problems.length, 1);
+        assert.match(problems[0], /used by Puppet, which needs a sensor that reads an assistant message/);
+
+        assert.deepEqual(changeProblems(preset, preset.sensors[0], choiceSensor(), { renames: new Map(), removed: [] }), []);
+    });
+
+    it('refuses the same change for a Run script rule and allows it for a nudge rule', () => {
+        const scripted = setup([
+            { ...usingCalm(), id: 'shot', label: 'Shot', action: 'script', directive: '', script: '/echo hi' },
+        ]).presets.Test;
+        const early = { ...choiceSensor(), assistant: 0 };
+        assert.match(
+            changeProblems(scripted, scripted.sensors[0], early, { renames: new Map(), removed: [] })[0],
+            /used by Shot, which needs a sensor that reads an assistant message/,
+        );
+
+        const nudging = setup([usingCalm()]).presets.Test;
+        assert.deepEqual(changeProblems(nudging, nudging.sensors[0], early, { renames: new Map(), removed: [] }), []);
     });
 
     it('allows both changes once no rule reads the sensor', () => {
@@ -260,6 +301,40 @@ describe('the sensor editor for each type', () => {
         assert.ok(hints(tab).includes('Jev gives the chance, from 0 to 100%, that your statement is true.'));
     });
 
+    it('offers the three input rows and says when the sensor runs', async () => {
+        setup();
+        const tab = await openSensor();
+        const hintWithId = id => tab.element.querySelectorAll('.jeved-hint').find(item => item.id === id);
+        assert.ok(labels(tab).includes('User messages'));
+        assert.ok(labels(tab).includes('Assistant messages'));
+        assert.ok(labels(tab).includes('Context'));
+        assert.ok(hints(tab).includes('The card and your prompts.'));
+        assert.equal(hintWithId('jeved_sensor_runs').textContent, 'Runs after each reply.');
+        assert.equal(hintWithId('jeved_sensor_hint').textContent, 'Refer to the reply as `latest_turn` and your message as `player_message`.');
+
+        const assistant = tab.element.querySelectorAll('.jeved-slider').find(item => item.id === 'jeved_sensor_assistant');
+        const bar = assistant.querySelector('.jeved-range');
+        assert.deepEqual([bar.min, bar.max, bar.step], ['0', '50', '1']);
+        bar.value = '0';
+        bar.fire('input');
+        assert.equal(hintWithId('jeved_sensor_runs').textContent, 'Runs before the reply, on your message.');
+        assert.equal(hintWithId('jeved_sensor_hint').textContent, 'Refer to your message as `player_message`.');
+    });
+
+    it('asks for at least one message once both sliders reach zero', async () => {
+        setup();
+        const tab = await openSensor();
+        for (const id of ['jeved_sensor_user', 'jeved_sensor_assistant']) {
+            const bar = tab.element.querySelectorAll('.jeved-slider').find(item => item.id === id).querySelector('.jeved-range');
+            bar.value = '0';
+            bar.fire('input');
+        }
+        const runs = tab.element.querySelectorAll('.jeved-hint').find(item => item.id === 'jeved_sensor_runs');
+        assert.equal(runs.textContent, 'Pick at least one message.');
+        await save(tab);
+        assert.match(problemText(tab), /Pick at least one message/);
+    });
+
     it('drops the old scale hint from every type', async () => {
         setup();
         const tab = await openSensor();
@@ -267,6 +342,68 @@ describe('the sensor editor for each type', () => {
             pickType(tab, type);
             assert.doesNotMatch(hints(tab).join(' '), /means the most possible/, type);
         }
+    });
+});
+
+describe('the rule form for each action', () => {
+    const openRule = async () => {
+        const tab = rulesTab({ refreshAll: () => {}, refreshOthers: () => {} });
+        body.replaceChildren(tab.element);
+        tab.element.querySelectorAll('.jeved-rule-row')[0].fire('click');
+        await settle();
+        return tab;
+    };
+    const labels = tab => tab.element.querySelectorAll('.jeved-form-label').map(item => item.textContent);
+    const pickAction = async (tab, id) => {
+        tab.element.querySelectorAll('.jeved-segment').find(item => item.dataset.jevedValue === id).fire('click');
+        await settle();
+    };
+
+    it('offers the three actions and swaps the instruction field for the script field', async () => {
+        setup([usingCalm()]);
+        const tab = await openRule();
+        assert.deepEqual(
+            tab.element.querySelectorAll('.jeved-segment').map(item => item.dataset.jevedValue),
+            ['nudge', 'swipe', 'script'],
+        );
+        assert.ok(labels(tab).includes('Instruction (OOC)'));
+
+        await pickAction(tab, 'script');
+        assert.equal(labels(tab).includes('Instruction (OOC)'), false);
+        assert.ok(labels(tab).includes('Script (STscript)'));
+        assert.ok(tab.element.querySelectorAll('.jeved-hint')
+            .some(item => item.textContent.startsWith("Runs the rule's script right after the reply.")));
+
+        await pickAction(tab, 'nudge');
+        assert.ok(labels(tab).includes('Instruction (OOC)'));
+    });
+
+    it('counts in messages for a rule on message sensors, and follows a condition change', async () => {
+        const settings = setup([usingCalm()]);
+        settings.presets.Test.sensors.find(sensor => sensor.id === 'mood').assistant = 0;
+        const tab = await openRule();
+        const inline = () => tab.element.querySelectorAll('.jeved-inline-label').map(item => item.textContent);
+        const hints = () => tab.element.querySelectorAll('.jeved-hint').map(item => item.textContent);
+
+        assert.ok(inline().includes('messages match'));
+        assert.ok(hints().some(line => line.startsWith('If your latest message matches this')));
+
+        const sensorPicker = tab.element.querySelectorAll('.jeved-picker')[0];
+        sensorPicker.value = 'tone';
+        sensorPicker.fire('change');
+        await settle();
+        assert.ok(inline().includes('replies match'));
+        assert.ok(hints().some(line => line.startsWith('If the latest reply matches this')));
+    });
+
+    it('refuses to save a script rule with no script', async () => {
+        setup([usingCalm()]);
+        const tab = await openRule();
+        await pickAction(tab, 'script');
+        buttonNamed(tab.element, 'Save').fire('click');
+        await settle();
+        assert.match(problemText(tab), /It needs a script/);
+        assert.equal(getPreset().rules[0].action, 'nudge');
     });
 });
 
@@ -335,28 +472,104 @@ describe('the probabilities of a test row', () => {
     });
 });
 
-describe('the reply details in Activity', () => {
-    const narrator = mes => ({ mes });
-
-    it('keeps a carried value that fits over a stored one that no longer does', () => {
-        const settings = setup();
-        const mood = settings.presets.Test.sensors.find(sensor => sensor.id === 'mood');
-        mood.measureEvery = 2;
-        context.chat = [narrator('one'), narrator('two')];
+describe('the answers a badge shows', () => {
+    it('reads the badged message itself as well as the reply before it', () => {
+        setup();
+        context.chat = [user('ask')];
         writeScores(context.chat[0], { mood: 'calm' });
-        writeScores(context.chat[1], { mood: 'tense' });
+        assert.deepEqual(answersFor(context.chat, { index: 0, entries: [{ rule: 'flat' }] }), { mood: 'calm' });
 
-        const tab = activityTab({ refreshAll: () => {} });
-        body.replaceChildren(tab.element);
-        const cells = tab.element.querySelectorAll('.jeved-cell');
-        cells[cells.length - 1].fire('click', { type: 'click' });
+        context.chat = [narrator('one'), user('ask')];
+        writeScores(context.chat[0], { tone: 2 });
+        writeScores(context.chat[1], { mood: 'calm' });
+        assert.deepEqual(answersFor(context.chat, { index: 1, entries: [{ rule: 'flat' }] }), { tone: 2, mood: 'calm' });
+    });
 
-        const lines = tab.element.querySelector('.jeved-detail').querySelectorAll('.jeved-detail-line');
-        assert.deepEqual(lines.map(line => line.textContent), ['Mood: calm - Settled. (carried over)']);
+    it('prefers the answers the entry carries and says nothing when there are none', () => {
+        setup();
+        context.chat = [user('ask')];
+        writeScores(context.chat[0], { mood: 'calm' });
+        const item = { index: 0, entries: [{ rule: 'flat', scores: { mood: 'angry' } }] };
+        assert.deepEqual(answersFor(context.chat, item), { mood: 'angry' });
+
+        context.chat = [user('ask')];
+        assert.equal(answersFor(context.chat, { index: 0, entries: [{ rule: 'flat' }] }), null);
+    });
+});
+
+describe('which receipts a column in Activity shows', () => {
+    it('puts an after-reply receipt under the reply it names, not under the first of a group', () => {
+        setup([{ ...usingCalm(), id: 'shot', label: 'Shot', action: 'script', directive: '', script: '/echo hi' }]);
+        context.chat = [user('ask'), narrator('one'), narrator('two')];
+        writeScores(context.chat[1], { mood: 'calm', tone: 1 });
+        writeScores(context.chat[2], { mood: 'calm', tone: 1 });
+        addFired(context.chat[0], { rule: 'shot', action: 'script', reason: 'r', reply: hashText('two') });
+
+        const tab = drawn();
+        assert.deepEqual(detailLines(tab, -1, '.jeved-detail-fired'), ['Shot: ran its script']);
+        assert.deepEqual(detailLines(tab, -2, '.jeved-detail-fired'), []);
+    });
+
+    it('leaves a reroll receipt on the reply that follows your message', () => {
+        setup([{ ...usingCalm(), id: 'puppet', label: 'Puppet', action: 'swipe' }]);
+        context.chat = [user('ask'), narrator('one'), narrator('two')];
+        writeScores(context.chat[1], { mood: 'calm', tone: 1 });
+        writeScores(context.chat[2], { mood: 'calm', tone: 1 });
+        addFired(context.chat[0], { rule: 'puppet', action: 'swipe', reason: 'r', text: '(OOC)' });
+
+        const tab = drawn();
+        assert.deepEqual(detailLines(tab, -2, '.jeved-detail-fired'), ['Puppet: rerolled the reply']);
+        assert.deepEqual(detailLines(tab, -1, '.jeved-detail-fired'), []);
+    });
+});
+
+describe('the columns in Activity', () => {
+    it('merges the answers of a reply and of the message before it into one column', () => {
+        const settings = setup();
+        settings.presets.Test.sensors.find(sensor => sensor.id === 'mood').assistant = 0;
+        context.chat = [user('ask'), narrator('one')];
+        writeScores(context.chat[0], { mood: 'calm' });
+        writeScores(context.chat[1], { tone: 2 });
+
+        assert.deepEqual(detailLines(drawn(), -1, '.jeved-detail-line'), ['Mood: calm - Settled.', 'Tone: 2 - c']);
+    });
+
+    it('adds a pending column for a measured message that has no reply yet', () => {
+        const settings = setup();
+        settings.presets.Test.sensors.find(sensor => sensor.id === 'mood').assistant = 0;
+        context.chat = [user('ask'), narrator('one'), user('and then?')];
+        writeScores(context.chat[1], { tone: 2 });
+        writeScores(context.chat[2], { mood: 'angry' });
+
+        const tab = drawn();
+        assert.equal(tab.element.querySelectorAll('.jeved-mark-cell').length, 2);
+        assert.deepEqual(detailLines(tab, -1, '.jeved-detail-line'), ['Mood: angry - Furious.']);
+    });
+
+    it('leaves out a pending column when the last message has no answers', () => {
+        setup();
+        context.chat = [user('ask'), narrator('one'), user('and then?')];
+        writeScores(context.chat[1], { tone: 2 });
+
+        assert.equal(drawn().element.querySelectorAll('.jeved-mark-cell').length, 1);
     });
 });
 
 describe('what the Cost section reports', () => {
+    const readouts = tab => tab.element.querySelectorAll('.jeved-readout').map(item => item.textContent);
+
+    it('counts the calls of each reply, and of each message once a sensor runs early', () => {
+        const settings = setup();
+        const plain = settingsTab({ refreshAll: () => {}, refreshOthers: () => {} });
+        assert.ok(readouts(plain).includes('Each reply: 1 API call'));
+        assert.equal(readouts(plain).some(line => line.startsWith('Each of your messages')), false);
+
+        settings.presets.Test.sensors.find(sensor => sensor.id === 'mood').assistant = 0;
+        const early = settingsTab({ refreshAll: () => {}, refreshOthers: () => {} });
+        assert.ok(readouts(early).includes('Each reply: 1 API call'));
+        assert.ok(readouts(early).includes('Each of your messages: 1 API call, before the reply'));
+    });
+
     it('always shows the tokens, and the cost beside them once there is one', () => {
         setup();
         addTokens(1200);

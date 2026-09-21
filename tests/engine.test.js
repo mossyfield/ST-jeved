@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { beforeEach, describe, it } from 'node:test';
+import { user } from './helpers/chat.js';
 import { hostStub } from './helpers/host.js';
 
 const scripts = [];
@@ -17,7 +18,6 @@ const { forceRule, forcedRule, interceptGeneration, lastError, setErrorText } = 
 const { getSettings, initSettings } = await import('../src/settings.js');
 const { fired, writeDecision, writeScores } = await import('../src/store.js');
 
-const user = mes => ({ mes, is_user: true });
 const narrator = mes => ({ mes, is_user: false });
 
 function rule(overrides = {}) {
@@ -45,10 +45,8 @@ function setup(rules) {
     settings.apiKey = 'test-key';
     settings.presets.Test = {
         description: '',
-        sensors: [{ id: 'change', label: 'Change', watch: false, turns: 1, includeContext: false, includeUser: true, measureEvery: 1, question: 'q', levels: ['a', 'b', 'c', 'd', 'e'] }],
+        sensors: [{ id: 'change', label: 'Change', watch: false, user: 1, assistant: 1, context: false, question: 'q', levels: ['a', 'b', 'c', 'd', 'e'] }],
         rules,
-        gap: 8,
-        maxNudges: 1,
     };
     settings.activePreset = 'Test';
     context.chat = [user('hello'), narrator('a quiet reply'), user('and then?')];
@@ -76,14 +74,34 @@ describe('interceptGeneration', () => {
 
     it('appends every fired text in order', async () => {
         setup([]);
-        writeDecision(context.chat[2], { fired: [
+        writeDecision(context.chat[2], [
             { rule: 'one', action: 'nudge', reason: 'r', text: 'first' },
             { rule: 'two', action: 'nudge', reason: 'r' },
             { rule: 'three', action: 'swipe', reason: 'r', text: 'second' },
-        ] });
+        ]);
         const copy = copyOf();
         await interceptGeneration(copy, 100, () => {}, 'normal');
         assert.equal(copy[2].mes, 'and then?\n\nfirst\n\nsecond');
+    });
+
+    it('leaves out the text of a decision made on an older version of the message', async () => {
+        setup([]);
+        writeDecision(context.chat[2], [{ rule: 'one', action: 'nudge', reason: 'r', text: 'stale' }]);
+        context.chat[2].mes = 'edited';
+        const copy = copyOf();
+        await interceptGeneration(copy, 100, () => {}, 'normal');
+        assert.equal(copy[2].mes, 'edited');
+        assert.deepEqual(fired(context.chat[2]).map(entry => entry.rule), ['one']);
+    });
+
+    it('does nothing for a generation with no user message or an empty one', async () => {
+        setup([rule()]);
+        context.chat = [narrator('a quiet reply')];
+        await interceptGeneration(copyOf(), 100, () => {}, 'normal');
+
+        context.chat = [user('   ')];
+        await interceptGeneration(copyOf(), 100, () => {}, 'normal');
+        assert.equal(fired(context.chat[0]).length, 0);
     });
 
     it('reuses the saved record on a swipe and does not run the script again', async () => {

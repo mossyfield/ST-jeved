@@ -1,6 +1,7 @@
 import { errorKind } from '../classifier.js';
-import { getSettings, schemaProblem } from '../settings.js';
-import { getScores, narratorIndices } from '../store.js';
+import { measuredSensors, missingIds, momentOf, sensorSignature } from '../sensors.js';
+import { getPreset, getSettings, schemaProblem } from '../settings.js';
+import { MESSAGE_MOMENT, REPLY_MOMENT, getScores, isNarrator, isUser } from '../store.js';
 
 export const JEVED_UPDATED = 'jeved_updated';
 
@@ -126,13 +127,13 @@ export function markPreset() {
     }
 }
 
-export function measureBlockReason() {
+export function measureBlockReason({ manual = false } = {}) {
     const problem = schemaProblem();
     if (problem) {
         return problem;
     }
     const settings = getSettings();
-    if (isPaused()) {
+    if (!manual && isPaused()) {
         return 'This chat is paused, so nothing here is measured.';
     }
     if (!settings.endpoint) {
@@ -148,7 +149,7 @@ export function isActive() {
     return !!getSettings().enabled && !measureBlockReason();
 }
 
-let countCache = { chatId: null, stamp: -1, value: 0 };
+let countCache = { chatId: null, stamp: -1, signature: '', value: 0 };
 let countStamp = 0;
 
 export function invalidateMeasured() {
@@ -167,12 +168,25 @@ export function measuredStamp() {
 export function measuredCount() {
     const context = SillyTavern.getContext();
     const chatId = context.getCurrentChatId();
-    if (countCache.chatId === chatId && countCache.stamp === countStamp) {
+    const preset = getPreset();
+    const signature = sensorSignature(preset);
+    if (countCache.chatId === chatId && countCache.stamp === countStamp && countCache.signature === signature) {
         return countCache.value;
     }
-    const chat = context.chat;
-    const value = narratorIndices(chat).filter(index => getScores(chat[index])).length;
-    countCache = { chatId, stamp: countStamp, value };
+    const wanted = measuredSensors(preset);
+    const needed = {
+        [REPLY_MOMENT]: wanted.filter(sensor => momentOf(sensor) === REPLY_MOMENT),
+        [MESSAGE_MOMENT]: wanted.filter(sensor => momentOf(sensor) === MESSAGE_MOMENT),
+    };
+    const complete = (message, moment) => needed[moment].length > 0
+        && !missingIds(needed[moment], getScores(message)?.scores).length;
+    const value = context.chat.filter(message => {
+        if (isNarrator(message)) {
+            return complete(message, REPLY_MOMENT);
+        }
+        return isUser(message) && complete(message, MESSAGE_MOMENT);
+    }).length;
+    countCache = { chatId, stamp: countStamp, signature, value };
     return value;
 }
 
@@ -208,5 +222,5 @@ export function status() {
     if (!measured) {
         return { kind: 'waiting', text: 'Waiting', next: '' };
     }
-    return { kind: 'measured', text: `Measured ${measured} ${measured === 1 ? 'reply' : 'replies'}`, next: '' };
+    return { kind: 'measured', text: `Measured ${measured} ${measured === 1 ? 'message' : 'messages'}`, next: '' };
 }

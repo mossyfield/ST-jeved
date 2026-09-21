@@ -313,7 +313,13 @@ function tryRow(item) {
     if (item.note) {
         mark.append(note(item.note));
     }
-    line.append(mark, text('div', 'jeved-try-text', item.text));
+    if (item.full && item.full !== item.text) {
+        const more = node('details', 'jeved-try-more');
+        more.append(text('summary', 'jeved-try-text', item.text), text('div', 'jeved-try-full', item.full));
+        line.append(mark, more);
+    } else {
+        line.append(mark, text('div', 'jeved-try-text', item.text));
+    }
     return line;
 }
 

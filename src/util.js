@@ -13,8 +13,10 @@ export function scoreText(value, missing = 'not measured') {
         : missing;
 }
 
-export function replyWord(count) {
-    return count === 1 ? '1 reply' : `${count} replies`;
+export function raceTimeout(task, limitMs, value) {
+    let timer = null;
+    const limit = new Promise(resolve => { timer = setTimeout(() => resolve(value), limitMs); });
+    return Promise.race([task, limit]).finally(() => clearTimeout(timer));
 }
 
 export function hashText(text) {

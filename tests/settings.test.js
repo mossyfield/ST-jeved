@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { BUILT_IN } from '../src/defaults.js';
+import { BUILT_IN, builtInPreset } from '../src/defaults.js';
 import { hostStub } from './helpers/host.js';
-import { SCHEMA_VERSION } from '../src/presets.js';
+import { SCHEMA_VERSION } from '../src/limits.js';
 import { conditionHolds } from '../src/rules.js';
 import { getPreset, getSettings, initSettings, normalisePreset, normaliseSettings, saveSettings, schemaProblem } from '../src/settings.js';
 
-const preset = (overrides = {}) => ({ description: '', sensors: [], rules: [], gap: 8, maxNudges: 1, ...overrides });
+const preset = (overrides = {}) => ({ description: '', sensors: [], rules: [], ...overrides });
 
 const host = extensionSettings => hostStub({ extensionSettings });
 
@@ -21,15 +21,22 @@ describe('normaliseSettings', () => {
         const settings = normaliseSettings({
             timeoutMs: 1e12,
             instructionsCap: -1,
-            presets: { a: preset({ gap: -2, maxNudges: 99, sensors: [{ id: 'a', turns: 2.6, measureEvery: -4 }] }) },
+            presets: { a: preset({ sensors: [{ id: 'a', user: 2.6, assistant: -4 }, { id: 'b', user: 99, assistant: 'lots' }] }) },
         });
         assert.equal(settings.timeoutMs, 600000);
         assert.equal(settings.instructionsCap, 0);
-        assert.deepEqual([settings.presets.a.gap, settings.presets.a.maxNudges], [0, 10]);
         assert.deepEqual(
-            [settings.presets.a.sensors[0].turns, settings.presets.a.sensors[0].measureEvery],
-            [3, 1],
+            settings.presets.a.sensors.map(sensor => [sensor.user, sensor.assistant]),
+            [[3, 0], [50, 1]],
         );
+    });
+
+    it('drops the settings that 0.3 removed', () => {
+        const settings = normaliseSettings({
+            presets: { a: preset({ gap: 8, maxNudges: 2, sensors: [{ id: 'a', turns: 5, includeUser: true, includeContext: true, measureEvery: 2 }] }) },
+        });
+        const [sensor] = settings.presets.a.sensors;
+        assert.deepEqual([sensor.user, sensor.assistant, sensor.context], [1, 1, false]);
     });
 
     it('keeps a rule countable: whole numbers, at least one, and need no larger than window', () => {
@@ -47,7 +54,7 @@ describe('normaliseSettings', () => {
         const [sensor] = settings.presets.a.sensors;
         assert.equal(sensor.levels.length, 5);
         assert.equal(sensor.watch, false);
-        assert.deepEqual([sensor.turns, sensor.includeContext, sensor.includeUser, sensor.measureEvery], [1, false, false, 1]);
+        assert.deepEqual([sensor.user, sensor.assistant, sensor.context], [1, 1, false]);
         assert.equal(settings.presets.a.rules[0].script, '');
     });
 
@@ -166,7 +173,10 @@ describe('normaliseSettings', () => {
         const settings = normaliseSettings({ presets: { bad: 5 } });
         assert.deepEqual(Object.keys(settings.presets), [BUILT_IN]);
         assert.equal(settings.activePreset, BUILT_IN);
-        assert.equal(settings.presets[BUILT_IN].rules.filter(rule => rule.enabled).length, 3);
+        assert.deepEqual(settings.presets[BUILT_IN].rules.filter(rule => rule.enabled).map(rule => rule.id), [
+            'puppet', 'attention', 'echo', 'drift', 'gentle',
+            'scene_combat', 'scene_conversation', 'scene_travel', 'scene_intimate',
+        ]);
     });
 });
 
@@ -225,7 +235,7 @@ describe('initSettings', () => {
         assert.equal(settings.apiKey, '');
         assert.equal(settings.instructionsCap, 24000);
         assert.equal(settings.activePreset, BUILT_IN);
-        assert.equal(settings.presets[BUILT_IN].sensors.length, 7);
+        assert.equal(settings.presets[BUILT_IN].sensors.length, 14);
     });
 
     it('starts over when the stored value is not a record', () => {
@@ -234,7 +244,7 @@ describe('initSettings', () => {
             host(extensionSettings);
             const settings = initSettings();
             assert.equal(settings.activePreset, BUILT_IN);
-            assert.equal(settings.presets[BUILT_IN].sensors.length, 7);
+            assert.equal(settings.presets[BUILT_IN].sensors.length, 14);
         }
     });
 
@@ -270,9 +280,9 @@ describe('initSettings', () => {
         const [tone, pace] = settings.presets.Mine.sensors;
         assert.equal(settings.schema, SCHEMA_VERSION);
         assert.equal(settings.instructionsCap, 48000);
-        assert.deepEqual([tone.turns, tone.includeContext, tone.includeUser, tone.measureEvery], [4, true, false, 1]);
-        assert.deepEqual([pace.turns, pace.includeContext, pace.includeUser, pace.measureEvery], [1, false, true, 1]);
-        assert.equal(tone.question, 'Does `latest_turns` fit `context`?');
+        assert.deepEqual([tone.user, tone.assistant, tone.context], [0, 4, true]);
+        assert.deepEqual([pace.user, pace.assistant, pace.context], [1, 1, false]);
+        assert.equal(tone.question, 'Does `history` and `latest_turn` fit `context`?');
         assert.equal(settings.presets.Mine.contextGroups.persona, true);
         assert.equal(settings.presets.Mine.storyWindow, undefined);
         assert.equal(settings.presets.Mine.jeved, SCHEMA_VERSION);
@@ -280,6 +290,84 @@ describe('initSettings', () => {
 
         initSettings();
         assert.equal(counts.saveCount, 1);
+    });
+
+    it('keeps the built-in preset out of the older migrations, however often it is loaded', () => {
+        host({});
+        const first = structuredClone(initSettings().presets[BUILT_IN]);
+        assert.equal(first.jeved, SCHEMA_VERSION);
+        const repeats = first.sensors.find(sensor => sensor.id === 'repeats');
+        assert.deepEqual([repeats.type, repeats.user, repeats.assistant, repeats.context], ['score', 0, 5, false]);
+
+        const again = initSettings().presets[BUILT_IN];
+        assert.deepEqual(again.sensors, first.sensors);
+        assert.deepEqual(again.rules, first.rules);
+    });
+
+    it('keeps Scene and Mood choices with their options through Restore built-in and a reload', () => {
+        const extensionSettings = {};
+        host(extensionSettings);
+        initSettings();
+
+        extensionSettings.jeved.presets[BUILT_IN] = builtInPreset();
+        normaliseSettings(extensionSettings.jeved);
+
+        const stored = initSettings().presets[BUILT_IN];
+        const scene = stored.sensors.find(sensor => sensor.id === 'scene');
+        assert.deepEqual([scene.type, scene.user, scene.assistant, scene.context], ['choice', 1, 0, false]);
+        assert.deepEqual(scene.options.map(option => option.name), ['combat', 'conversation', 'travel', 'intimate', 'downtime']);
+        assert.ok(scene.options.every(option => option.description));
+
+        const mood = stored.sensors.find(sensor => sensor.id === 'mood');
+        assert.deepEqual([mood.type, mood.user, mood.assistant, mood.context], ['choice', 0, 1, false]);
+        assert.equal(mood.options.length, 28);
+        assert.equal(mood.options.at(-1).name, 'neutral');
+        assert.ok(mood.options.every(option => option.name && option.description === ''));
+        assert.equal(stored.rules.find(rule => rule.id === 'mood').conditions[0].value, 'neutral');
+
+        const rules = stored.rules.filter(rule => rule.id.startsWith('scene_'));
+        assert.deepEqual(rules.map(rule => [rule.label, rule.enabled, rule.conditions[0].value]), [
+            ['Scene: combat', true, 'combat'],
+            ['Scene: conversation', true, 'conversation'],
+            ['Scene: travel', true, 'travel'],
+            ['Scene: intimate', true, 'intimate'],
+        ]);
+        assert.ok(rules.every(rule => rule.need === 1 && rule.window === 1 && rule.cooldown === 0 && rule.directive));
+    });
+
+    it('says which sensors changed wording when it upgrades a stored schema 3 file', () => {
+        const notices = [];
+        globalThis.toastr = { info: message => notices.push(message), error() {}, success() {}, warning() {} };
+        host({
+            jeved: {
+                schema: 3,
+                activePreset: 'Mine',
+                presets: { Mine: {
+                    description: '',
+                    rules: [{ id: 'r', enabled: true, action: 'nudge', need: 1, window: 1, directive: '(OOC)', conditions: [{ sensor: 'tone', op: 'below', value: 1 }] }],
+                    gap: 7,
+                    sensors: [{ id: 'tone', label: 'Tone', turns: 5, includeUser: false, includeContext: true, measureEvery: 1, question: 'Does `latest_turns` fit?', levels: ['a', 'b'] }],
+                } },
+            },
+        });
+        const stored = initSettings().presets.Mine;
+        assert.deepEqual(notices, ['Jeved 0.3 changed the wording of these sensors. Check: Tone.']);
+        assert.deepEqual([stored.sensors[0].user, stored.sensors[0].assistant, stored.sensors[0].context], [0, 5, true]);
+        assert.equal(stored.rules[0].cooldown, 7);
+    });
+
+    it('shows one notice when two stored presets get the same wording change', () => {
+        const notices = [];
+        globalThis.toastr = { info: message => notices.push(message), error() {}, success() {}, warning() {} };
+        const old = () => ({
+            description: '',
+            rules: [],
+            gap: 1,
+            sensors: [{ id: 'tone', label: 'Tone', turns: 5, includeUser: false, includeContext: true, measureEvery: 1, question: 'Does `latest_turns` fit?', levels: ['a', 'b'] }],
+        });
+        host({ jeved: { schema: 3, activePreset: 'Mine', presets: { Mine: old(), 'Mine (2)': old() } } });
+        initSettings();
+        assert.deepEqual(notices, ['Jeved 0.3 changed the wording of these sensors. Check: Tone.']);
     });
 
     it('keeps the groups a stored schema 2 preset left out of its map switched on', () => {
@@ -322,7 +410,7 @@ describe('initSettings', () => {
         };
         const counts = host(extensionSettings);
         const settings = initSettings();
-        assert.equal(settings.presets.Mine.sensors[0].turns, 3);
+        assert.equal(settings.presets.Mine.sensors[0].assistant, 3);
         assert.equal(settings.schema, SCHEMA_VERSION);
         assert.equal(counts.saveCount, 1);
     });

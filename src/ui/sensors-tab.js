@@ -1,16 +1,16 @@
 import { blankSensor } from '../defaults.js';
-import { excerpt, listPhrase, questionKeysHint, readsTag, rescanSentence, sensorProblem, tokenWords } from '../describe.js';
-import { describeError, measureBlockReason, planMeasurement, rescan, testSensor } from '../engine.js';
+import { excerpt, listPhrase, momentLine, momentTag, questionKeysHint, rescanSentence, sensorProblem, tokenWords } from '../describe.js';
+import { describeError, measureBlockReason, planMeasurement, rescan, testIndices, testSensor } from '../engine.js';
 import { buildContext, countTokens } from '../instructions.js';
-import { LEVELS, OPTIONS, TURNS } from '../limits.js';
+import { LEVELS, MESSAGES, OPTIONS } from '../limits.js';
 import { legacyReference, renameOption, slugId, validatePreset } from '../presets.js';
 import { CHOICE, NOUL, SENSOR_TYPES, sensorLabel, typeOf, valueText } from '../sensor-types.js';
-import { buildRequest, groupKeyOf, groupSensors } from '../sensors.js';
+import { buildRequest, groupKeyOf, groupSensors, missesReplySensor, momentCount, momentOf, momentWord } from '../sensors.js';
 import { getPreset, getSettings, normalisePreset, saveSettings } from '../settings.js';
-import { currentChat, isNarrator, latestScores, narratorIndices } from '../store.js';
+import { currentChat, latestScores } from '../store.js';
 import { toast } from '../toast.js';
-import { isRecord, replyWord } from '../util.js';
-import { actions, area, busy, button, checkbox, clampNumber, column, detach, field, formRow, help, iconButton, node, note, resultsBox, row, section, segmented, setLabel, text, toggle, toolbar, withReason } from './dom.js';
+import { isRecord } from '../util.js';
+import { actions, area, busy, button, column, detach, field, formRow, help, iconButton, node, note, resultsBox, row, section, segmented, setLabel, slider, text, toggle, toolbar, withReason } from './dom.js';
 import { ask } from './dialogs.js';
 import { masterDetail } from './master.js';
 
@@ -19,7 +19,7 @@ const CROWDED = 30000;
 const READS_DELAY = 250;
 const SPREAD_ALL = 10;
 const SPREAD_TOP = 5;
-const NO_REPLIES = 'This chat has no replies to test yet.';
+const COUNT_RANGE = { min: MESSAGES.min, max: MESSAGES.max, step: 1, decimals: 0 };
 
 const TYPE_OPTIONS = SENSOR_TYPES.map(type => ({ value: type.id, label: type.label }));
 
@@ -54,6 +54,11 @@ export function optionChanges(before, draft) {
     return { renames, removed };
 }
 
+function momentBreaks(preset, saved, candidate) {
+    const sensors = preset.sensors.map(sensor => (sensor.id === saved.id ? candidate : sensor));
+    return usedBy(preset, saved.id).filter(rule => missesReplySensor(rule, sensors));
+}
+
 export function changeProblems(preset, saved, candidate, changes) {
     const used = usedBy(preset, saved.id);
     if (!used.length) {
@@ -63,6 +68,10 @@ export function changeProblems(preset, saved, candidate, changes) {
     if (typeOf(candidate).id !== typeOf(saved).id) {
         problems.push(`This sensor is used by ${ruleNames(used)}, so its type can't change. Change those rules first.`);
     }
+    const broken = momentBreaks(preset, saved, candidate);
+    if (broken.length) {
+        problems.push(`This sensor is used by ${ruleNames(broken)}, which needs a sensor that reads an assistant message. Change those rules first.`);
+    }
     for (const name of changes.removed) {
         const holders = usedBy(preset, saved.id, condition => condition.value === name);
         if (holders.length) {
@@ -70,10 +79,6 @@ export function changeProblems(preset, saved, candidate, changes) {
         }
     }
     return problems;
-}
-
-function narratorCount() {
-    return currentChat().filter(isNarrator).length;
 }
 
 function candidateSensor(draft, takenIds) {
@@ -114,13 +119,18 @@ function testNote(row) {
 }
 
 function testBlock(draft, takenIds, api) {
-    const count = () => Math.min(TEST_REPLIES, narratorCount());
-    const caption = () => (count() ? `Test on last ${count()} replies (${count()} API calls)` : 'Test');
+    const moment = () => momentOf(draft);
+    const count = () => testIndices(draft, TEST_REPLIES).length;
+    const nothing = () => `This chat has no ${momentWord(moment())} to test yet.`;
+    const caption = () => (count()
+        ? `Test on last ${momentCount(moment(), count())} (${count()} API calls)`
+        : 'Test');
     const scored = rows => rows.filter(row => !row.error).map(row => ({
         index: row.index,
         tag: valueText(draft, row.value, ''),
         note: testNote(row),
         text: excerpt(row.text),
+        full: String(row.text ?? ''),
     }));
     const box = resultsBox();
     const hint = note('');
@@ -151,7 +161,7 @@ function testBlock(draft, takenIds, api) {
                 },
             );
             const rows = scored(collected);
-            box.show(`Answers for the last ${replyWord(rows.length)}`, rows, 'Nothing was measured.');
+            box.show(`Answers for the last ${momentCount(moment(), rows.length)}`, rows, 'Nothing was measured.');
             const failed = collected.find(row => row.error);
             if (failed) {
                 box.warn(failed.error);
@@ -161,7 +171,6 @@ function testBlock(draft, takenIds, api) {
             box.fail(describeError(error));
         } finally {
             controller = null;
-            setLabel(run, caption());
             paint();
         }
     });
@@ -169,20 +178,24 @@ function testBlock(draft, takenIds, api) {
     function paint() {
         const blocked = measureBlockReason();
         run.title = blocked || 'Measure the recent replies with this wording';
+        hint.textContent = blocked || (count() ? '' : nothing());
+        if (controller) {
+            return;
+        }
         busy(run, !count() || !!blocked);
-        hint.textContent = blocked || (count() ? '' : NO_REPLIES);
+        setLabel(run, caption());
     }
 
     paint();
     api.onRefresh(paint);
     api.onClose(() => controller?.abort());
-    return section('Test', toolbar(run, hint), box.element);
+    return { element: section('Test', toolbar(run, hint), box.element), paint };
 }
 
 async function requestTokens(draft, preset) {
     const settings = getSettings();
     let total = 0;
-    if (draft.includeContext) {
+    if (draft.context) {
         const built = await buildContext(preset.contextGroups, settings.instructionsCap);
         if (built.total === null) {
             return null;
@@ -190,7 +203,7 @@ async function requestTokens(draft, preset) {
         total += built.total;
     }
     const chat = currentChat();
-    const [latest] = narratorIndices(chat);
+    const [latest] = testIndices(draft, 1);
     if (latest === undefined) {
         return total;
     }
@@ -331,6 +344,9 @@ function sensorPane(preset, draft, api, host, { saved, otherIds }) {
     const reads = readsBlock(preset, draft, saved, api);
     const askRow = node('div', 'jeved-ask-row');
     const typeAbout = help(typeOf(draft).about);
+    const runsLine = help(momentLine(draft));
+    runsLine.id = 'jeved_sensor_runs';
+    const test = testBlock(draft, otherIds, api);
 
     const paintWording = () => {
         const found = legacyReference(draft);
@@ -339,6 +355,8 @@ function sensorPane(preset, draft, api, host, { saved, otherIds }) {
     };
     const touch = () => {
         questionHint.textContent = questionKeysHint(draft);
+        runsLine.textContent = momentLine(draft);
+        test.paint();
         reads.schedule();
         api.markDirty();
     };
@@ -356,24 +374,19 @@ function sensorPane(preset, draft, api, host, { saved, otherIds }) {
     });
     typeControl.id = 'jeved_sensor_type';
 
-    const turnsField = field('number', draft.turns, '', value => { draft.turns = value; touch(); }, {
-        min: TURNS.min, max: TURNS.max, step: '1', clamp: value => clampNumber(value, TURNS.min, TURNS.max),
+    const userSlider = slider(draft.user, value => { draft.user = value; touch(); }, {
+        range: COUNT_RANGE, label: 'User messages',
     });
-    turnsField.id = 'jeved_sensor_turns';
-    const everyField = field('number', draft.measureEvery, '', value => { draft.measureEvery = value; touch(); }, {
-        min: TURNS.min, max: TURNS.max, step: '1', clamp: value => clampNumber(value, TURNS.min, TURNS.max),
+    userSlider.id = 'jeved_sensor_user';
+    const assistantSlider = slider(draft.assistant, value => { draft.assistant = value; touch(); }, {
+        range: COUNT_RANGE, label: 'Assistant messages',
     });
-    everyField.id = 'jeved_sensor_every';
-    const contextToggle = toggle(draft.includeContext, 'Send the card and the prompts with this sensor', value => {
-        draft.includeContext = value;
+    assistantSlider.id = 'jeved_sensor_assistant';
+    const contextToggle = toggle(draft.context, 'Send the card and the prompts with this sensor', value => {
+        draft.context = value;
         touch();
     });
     contextToggle.id = 'jeved_sensor_context';
-    const userToggle = toggle(draft.includeUser, 'Send your own messages with this sensor', value => {
-        draft.includeUser = value;
-        touch();
-    });
-    userToggle.id = 'jeved_sensor_user';
 
     function drawAsk() {
         const type = typeOf(draft);
@@ -404,11 +417,11 @@ function sensorPane(preset, draft, api, host, { saved, otherIds }) {
         formRow('Type', column('', typeControl, typeAbout)),
         column(
             'jeved-field-grid',
-            formRow('History (replies)', turnsField),
-            formRow('Interval (replies)', everyField),
-            formRow('Include context', contextToggle),
-            formRow('Include my messages', userToggle),
+            formRow('User messages', userSlider),
+            formRow('Assistant messages', assistantSlider),
+            formRow('Context', contextToggle, 'The card and your prompts.'),
         ),
+        runsLine,
         reads.element,
         askRow,
         scale.element,
@@ -417,7 +430,7 @@ function sensorPane(preset, draft, api, host, { saved, otherIds }) {
             watchToggle,
             'Measure this sensor even when no rule uses it, so its answers show in Activity.',
         ),
-        testBlock(draft, otherIds, api),
+        test.element,
         actions(button('Delete sensor', 'Delete this sensor', async () => {
             if (!saved) {
                 return;
@@ -462,20 +475,13 @@ export function sensorsTab(host) {
             const line = node('div', 'jeved-sensor-row');
             const used = usedBy(preset, sensor.id).filter(rule => rule.enabled);
             const names = ruleNames(used);
+            line.classList.toggle('jeved-list-row--off', !used.length && !sensor.watch);
+            line.title = names ? `Used by: ${names}` : (sensor.watch ? 'Measured, no rule uses it' : 'Not measured');
             line.append(
                 text('span', 'jeved-sensor-name', sensorLabel(preset.sensors, sensor.id)),
                 text('span', 'jeved-sensor-score', valueText(sensor, latest[sensor.id], '')),
-                text('span', 'jeved-sensor-note', `${typeOf(sensor).caption(sensor)} · ${readsTag(sensor)} · ${names ? `Used by: ${names}` : 'Unused'}`),
+                text('span', 'jeved-sensor-note', [typeOf(sensor).caption(sensor), momentTag(momentOf(sensor))].join(' · ')),
             );
-            if (!used.length) {
-                const watch = checkbox('Measure anyway', sensor.watch, value => {
-                    sensor.watch = value;
-                    saveSettings();
-                    api.listChanged(sensor.id, { watch: value });
-                });
-                watch.classList.add('jeved-list-keep', 'jeved-sensor-watch');
-                line.append(watch);
-            }
             return line;
         },
         paneOf: (draft, api, selected) => {
