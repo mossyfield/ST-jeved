@@ -5,7 +5,7 @@ import { conditionShort, conditionText, sensorLabel, valueText } from '../src/se
 import { hashText, scoreText } from '../src/util.js';
 
 const sensors = [
-    { id: 'tone', label: 'Tone', user: 0, assistant: 5, context: true, levels: ['Zero.', 'One.', 'Two.', 'Three.', 'Four.'] },
+    { id: 'tone', label: 'Tone', user: 0, assistant: 5, context: 'all', levels: ['Zero.', 'One.', 'Two.', 'Three.', 'Four.'] },
     { id: 'tension', label: 'Tension', user: 1, assistant: 1, levels: ['None.', 'Mild.', 'Clear.', 'High.', 'Extreme.'] },
     { id: 'bare', label: '', user: 1, assistant: 1, levels: [] },
     { id: 'scene', label: 'Scene', user: 1, assistant: 0, levels: ['Zero.', 'One.', 'Two.', 'Three.', 'Four.'] },
@@ -79,8 +79,8 @@ describe('words for one value', () => {
             'Refer to the reply as `latest_turn` and your message as `player_message`.',
         );
         assert.equal(
-            questionKeysHint({ user: 1, assistant: 1, context: true }),
-            'Refer to the reply as `latest_turn`, your message as `player_message`, and the card and prompts as `context`.',
+            questionKeysHint({ user: 1, assistant: 1, context: 'all' }),
+            'Refer to the reply as `latest_turn`, your message as `player_message`, and the pieces you picked as `context`.',
         );
     });
 
@@ -90,8 +90,8 @@ describe('words for one value', () => {
             'Refer to the reply as `latest_turn` and the earlier messages as `history`.',
         );
         assert.equal(
-            questionKeysHint({ user: 3, assistant: 0, context: true }),
-            'Refer to your message as `player_message`, the earlier messages as `history`, and the card and prompts as `context`.',
+            questionKeysHint({ user: 3, assistant: 0, context: 'all' }),
+            'Refer to your message as `player_message`, the earlier messages as `history`, and the pieces you picked as `context`.',
         );
         assert.equal(questionKeysHint({ user: 0, assistant: 0 }), '');
     });

@@ -1,13 +1,14 @@
-import { decisionSentence, entryWords, excerpt, levelText, rescanSentence, ruleLabel, scoreLine, stripChart } from '../describe.js';
+import { decisionSentence, entryLines, entryWords, excerpt, levelText, rescanSentence, ruleLabel, scoreLine, stripChart } from '../describe.js';
 import { cancelRescan, chatPreset, clearChatScores, isRescanning, lastDecision, measureBlockReason, measuredCount, planMeasurement, plannedCalls, rescan } from '../engine.js';
-import { conditionTail, findSensor, hasValue, valueText } from '../sensor-types.js';
+import { fillEntries, listResolver } from '../lists.js';
+import { conditionTail, findSensor, hasValue, repeatOf, valueText } from '../sensor-types.js';
 import { measuredSensors } from '../sensors.js';
 import { getPreset, getSettings } from '../settings.js';
 import { MESSAGE_MOMENT, REPLY_MOMENT, currentChat, fired, getHistory, getScores, isNarrator, isUser, lastUserIndex } from '../store.js';
 import { toast } from '../toast.js';
 import { hashText } from '../util.js';
 import { ask } from './dialogs.js';
-import { actions, activate, button, help, node, section, text, withReason } from './dom.js';
+import { actions, activate, button, fold, help, node, section, text, withReason } from './dom.js';
 
 const COLUMNS = 20;
 const CELL_CHARS = 2;
@@ -44,9 +45,17 @@ function buildColumns(preset) {
     return columns.slice(Math.max(0, columns.length - COLUMNS));
 }
 
-function cellText(sensor, value) {
-    const shown = valueText(sensor, value, '');
-    return typeof value === 'string' ? shown.slice(0, CELL_CHARS) : shown;
+function cellText(sensor, cell) {
+    if (cell.count) {
+        return String(cell.value);
+    }
+    const shown = valueText(sensor, cell.value, '');
+    return typeof cell.value === 'string' ? shown.slice(0, CELL_CHARS) : shown;
+}
+
+function cellTitle(sensor, cell, label) {
+    const answer = cell.count ? `${cell.value ?? 0} answered` : valueText(sensor, cell.value);
+    return `${columnName(cell.index)}. ${label}: ${answer}`;
 }
 
 function cellElement(cell, sensor, label, onPick) {
@@ -58,12 +67,12 @@ function cellElement(cell, sensor, label, onPick) {
         classes.push('jeved-cell--on');
     }
     const element = node('div', classes.join(' '), {
-        title: `${columnName(cell.index)}. ${label}: ${valueText(sensor, cell.value)}`,
+        title: cellTitle(sensor, cell, label),
         tabIndex: 0,
     });
     element.dataset.jevedIndex = String(cell.index);
     if (cell.value !== null) {
-        element.textContent = cellText(sensor, cell.value);
+        element.textContent = cellText(sensor, cell);
     }
     activate(element, () => onPick(cell.index));
     return element;
@@ -125,12 +134,26 @@ function detailElement(preset, index, entry) {
     block.append(text('div', 'jeved-excerpt', excerpt(message?.mes, 240)));
 
     const scores = entry?.scores ?? {};
-    const lines = measuredSensors(preset)
-        .filter(sensor => hasValue(sensor, scores[sensor.id]))
-        .map(sensor => scoreLine(sensor, scores[sensor.id], {
-            words: context.substituteParams(levelText(sensor, scores[sensor.id])),
-        }));
-    block.append(...(lines.length ? lines.map(line => text('div', 'jeved-detail-line', line)) : [help('This message has no answers.')]));
+    const entriesOf = listResolver(preset);
+    const shown = [];
+    for (const sensor of measuredSensors(preset)) {
+        if (!hasValue(sensor, scores[sensor.id])) {
+            continue;
+        }
+        const list = repeatOf(sensor);
+        if (!list) {
+            shown.push(text('div', 'jeved-detail-line', scoreLine(sensor, scores[sensor.id], {
+                words: context.substituteParams(levelText(sensor, scores[sensor.id])),
+            })));
+            continue;
+        }
+        const lines = entryLines(sensor, scores[sensor.id], entriesOf(list));
+        shown.push(fold(
+            `${sensor.label || sensor.id}: ${lines.length} ${lines.length === 1 ? 'entry' : 'entries'}`,
+            ...lines.map(line => text('div', 'jeved-detail-line', line)),
+        ));
+    }
+    block.append(...(shown.length ? shown : [help('This message has no answers.')]));
 
     const entries = firedOn(index);
     if (!entries.length) {
@@ -143,7 +166,7 @@ function detailElement(preset, index, entry) {
             block.append(text('div', 'jeved-detail-line', one.reason));
         }
         if (one.text) {
-            block.append(text('pre', 'jeved-script-text', one.text));
+            block.append(text('pre', 'jeved-script-text', fillEntries(one.text, one.entries ?? [])));
         }
     }
     return block;
@@ -209,7 +232,8 @@ export function activityTab(host) {
         } else if (!columns.length) {
             children.push(help('This chat has no replies yet.'));
         } else {
-            children.push(stripElement(stripChart({ columns, sensors, rules: preset.rules, fired: firedBy }), sensors, index => {
+            const chart = stripChart({ columns, sensors, rules: preset.rules, fired: firedBy, listEntries: listResolver(preset) });
+            children.push(stripElement(chart, sensors, index => {
                 picked = index;
                 draw();
             }));

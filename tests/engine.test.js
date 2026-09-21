@@ -108,7 +108,9 @@ describe('interceptGeneration', () => {
         setup([rule({ script: '/echo hello' })]);
         await interceptGeneration(copyOf(), 100, () => {}, 'normal');
         assert.equal(scripts.length, 1);
-        assert.deepEqual(scripts[0].options, { handleParserErrors: false, handleExecutionErrors: false });
+        assert.equal(scripts[0].options.handleParserErrors, false);
+        assert.equal(scripts[0].options.handleExecutionErrors, false);
+        assert.equal(scripts[0].options.scope.getVariable('jeved_rule'), 'flat');
         const copy = copyOf();
         await interceptGeneration(copy, 100, () => {}, 'swipe');
         assert.equal(scripts.length, 1);

@@ -1,3 +1,4 @@
+import { actionOf } from './actions.js';
 import { hasValue } from './sensor-types.js';
 import { hashText, isRecord } from './util.js';
 
@@ -25,9 +26,31 @@ function ensureExtra(message) {
     return message.extra;
 }
 
+const LISTS_KEY = 'jeved_lists';
+
 export function getRecord(message) {
     const record = message?.extra?.[KEY];
     return record && typeof record === 'object' ? record : null;
+}
+
+export function setRecord(message, patch) {
+    const extra = ensureExtra(message);
+    extra[KEY] = { ...getRecord(message), ...patch };
+    return extra[KEY];
+}
+
+export function manualChanges() {
+    const held = SillyTavern.getContext().chatMetadata?.[LISTS_KEY];
+    return Array.isArray(held) ? held : [];
+}
+
+export function writeManualChanges(changes) {
+    const context = SillyTavern.getContext();
+    if (!context.chatMetadata) {
+        return;
+    }
+    context.chatMetadata[LISTS_KEY] = changes;
+    context.saveMetadataDebounced();
 }
 
 function firedOf(record) {
@@ -51,20 +74,28 @@ export function getScores(message) {
     return record;
 }
 
+function merged(before, next) {
+    return isRecord(before) && isRecord(next) ? { ...before, ...next } : next;
+}
+
 export function writeScores(message, scores, hash = hashText(message.mes), confidence = {}) {
     const extra = ensureExtra(message);
     const current = getRecord(message);
     const fresh = !!current && current.hash === hash;
-    const kept = fresh && current.scores ? current.scores : {};
+    const kept = fresh && current.scores ? { ...current.scores } : {};
     const levels = fresh && isRecord(current.confidence) ? { ...current.confidence } : {};
     for (const id of Object.keys(scores)) {
-        if (typeof confidence?.[id] === 'number' && Number.isFinite(confidence[id])) {
-            levels[id] = confidence[id];
+        const found = confidence?.[id];
+        if (typeof found === 'number' && Number.isFinite(found)) {
+            levels[id] = found;
+        } else if (isRecord(found)) {
+            levels[id] = merged(levels[id], found);
         } else {
             delete levels[id];
         }
+        kept[id] = merged(kept[id], scores[id]);
     }
-    extra[KEY] = { ...current, hash, scores: { ...kept, ...scores }, confidence: levels };
+    extra[KEY] = { ...current, hash, scores: kept, confidence: levels };
     return extra[KEY];
 }
 
@@ -101,6 +132,22 @@ function sensorMap(sensors) {
     return byId;
 }
 
+function confidenceOf(level) {
+    if (typeof level === 'number' && Number.isFinite(level)) {
+        return level;
+    }
+    if (!isRecord(level)) {
+        return null;
+    }
+    const kept = {};
+    for (const [key, one] of Object.entries(level)) {
+        if (typeof one === 'number' && Number.isFinite(one)) {
+            kept[key] = one;
+        }
+    }
+    return Object.keys(kept).length ? kept : null;
+}
+
 function answersOf(message, byId) {
     const record = getScores(message);
     if (!record || !isRecord(record.scores)) {
@@ -113,8 +160,8 @@ function answersOf(message, byId) {
             continue;
         }
         values[id] = value;
-        const level = record.confidence?.[id];
-        if (typeof level === 'number' && Number.isFinite(level)) {
+        const level = confidenceOf(record.confidence?.[id]);
+        if (level !== null) {
             confidence[id] = level;
         }
     }
@@ -198,25 +245,52 @@ export function getHistory(chat, count, moment = REPLY_MOMENT, sensors = []) {
     return found.reverse().map(record => entryOf(record));
 }
 
-export function repliesSince(chat, predicate, limit = Infinity) {
-    let found = -1;
-    for (let i = chat.length - 1; i >= 0 && found < 0; i--) {
-        if (isUser(chat[i]) && predicate(getRecord(chat[i]))) {
-            found = i;
+export function sinceRuleIn(chat) {
+    const positions = new Map();
+    let replies = 0;
+    let waiting = [];
+
+    for (const message of chat) {
+        if (isUser(message)) {
+            waiting = [];
+            for (const entry of fired(message)) {
+                if (entry?.rule === undefined) {
+                    continue;
+                }
+                positions.set(entry.rule, replies);
+                if (entry.reply !== undefined) {
+                    waiting.push(entry);
+                }
+            }
+        } else if (isNarrator(message)) {
+            const hash = hashText(message.mes);
+            for (const entry of waiting) {
+                if (entry.reply === hash) {
+                    positions.set(entry.rule, replies);
+                }
+            }
+            replies++;
         }
     }
-    if (found < 0) {
-        return Infinity;
+
+    return id => (positions.has(id) ? replies - positions.get(id) : Infinity);
+}
+
+export function makeReceipt({ rule, reason, entries }, action, { reply, scores } = {}) {
+    const entry = { rule: rule.id, action, reason };
+    if (reply !== undefined) {
+        entry.reply = reply;
     }
-    return narratorIndices(chat, { limit }).filter(index => index > found).length;
-}
-
-export function replyPosition(chat, index) {
-    return narratorIndices(chat, { from: index }).length;
-}
-
-export function firedRule(id) {
-    return record => firedOf(record).some(entry => entry?.rule === id);
+    if (entries?.length) {
+        entry.entries = [...entries];
+    }
+    if (actionOf(action)?.usesDirective && String(rule.directive ?? '').trim()) {
+        entry.text = rule.directive;
+    }
+    if (scores && Object.keys(scores).length) {
+        entry.scores = scores;
+    }
+    return entry;
 }
 
 function asReceipt(entry) {
@@ -245,8 +319,6 @@ export function addFired(message, entry, hash = hashText(message.mes)) {
     const record = getRecord(message);
     extra[KEY] = {
         ...record,
-        decided: true,
-        decidedHash: record?.decidedHash ?? hash,
         fired: [...firedOf(record), { ...entry, hash }],
     };
     return extra[KEY];

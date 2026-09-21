@@ -1,6 +1,7 @@
 import { AFTER_REPLY, DEFAULT_ACTION, replacesReply, ruleAction } from './actions.js';
+import { entryKey } from './lists.js';
 import { conditionHolds, missingSensors, scoreOf } from './rules.js';
-import { conditionText, sensorLabel, typeOf, valueText } from './sensor-types.js';
+import { conditionText, entryValue, repeatOf, sensorLabel, typeOf, valueText } from './sensor-types.js';
 import { NO_INPUT, hasInput, labelsFor, latestWords, momentCount, momentOf, momentOfRule, windowWords } from './sensors.js';
 import { MESSAGE_MOMENT, REPLY_MOMENT, firedFor, isNarrator, lastUserIndex } from './store.js';
 
@@ -8,7 +9,7 @@ const LABEL_WORDS = {
     latest_turn: 'the reply as `latest_turn`',
     player_message: 'your message as `player_message`',
     history: 'the earlier messages as `history`',
-    context: 'the card and prompts as `context`',
+    context: 'the pieces you picked as `context`',
 };
 
 export function momentTag(moment) {
@@ -68,7 +69,22 @@ export function bandText(sensor, value) {
     return typeOf(sensor).band(sensor, value);
 }
 
-export function stripChart({ columns = [], sensors = [], rules = [], fired: firedBy = {} } = {}) {
+export function entryLines(sensor, stored, entries = []) {
+    return entries.map(entry => `${entry}: ${valueText(sensor, entryValue(sensor, stored, entryKey(entry)))}`);
+}
+
+function repeatingCell(column, sensor, ticks, entries) {
+    const keys = entries.map(entry => entryKey(entry));
+    const answered = keys.filter(key => scoreOf(column, sensor.id, key) !== null).length;
+    return {
+        index: column.index,
+        value: answered ? answered : null,
+        count: true,
+        matching: keys.some(key => ticks.some(tick => conditionHolds(column, tick.condition, key))),
+    };
+}
+
+export function stripChart({ columns = [], sensors = [], rules = [], fired: firedBy = {}, listEntries = null } = {}) {
     const active = (rules ?? []).filter(rule => rule?.enabled);
     return {
         columns: columns.map(column => {
@@ -88,15 +104,21 @@ export function stripChart({ columns = [], sensors = [], rules = [], fired: fire
                     }
                 }
             }
+            const list = repeatOf(sensor);
+            const entries = list && listEntries ? listEntries(list) : [];
             return {
                 id: sensor.id,
                 label: sensorLabel(sensors, sensor.id),
+                repeat: list,
+                entries,
                 ticks,
-                cells: columns.map(column => ({
-                    index: column.index,
-                    value: scoreOf(column, sensor.id),
-                    matching: ticks.some(tick => conditionHolds(column, tick.condition)),
-                })),
+                cells: columns.map(column => (list
+                    ? repeatingCell(column, sensor, ticks, entries)
+                    : {
+                        index: column.index,
+                        value: scoreOf(column, sensor.id),
+                        matching: ticks.some(tick => conditionHolds(column, tick.condition)),
+                    })),
             };
         }),
     };
@@ -119,6 +141,9 @@ function thenWords(rule) {
     const script = !!String(rule.script ?? '').trim();
     if (!action) {
         return script ? 'run a script' : 'do nothing';
+    }
+    if (action.usesList) {
+        return script ? `${action.presentTense} and run a script` : action.presentTense;
     }
     if (!action.usesDirective) {
         return script ? action.presentTense : 'do nothing';

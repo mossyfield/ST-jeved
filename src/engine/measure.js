@@ -1,12 +1,15 @@
 import { cancelled, isCancelled, provider } from '../classifier.js';
-import { buildContext } from '../instructions.js';
+import { contextKey, sendsContext } from '../context-groups.js';
+import { assembleContext, countPieces, presentPieces, promptKeys, readContextGroups } from '../instructions.js';
 import { SAVE_DELAY } from '../limits.js';
-import { macroText, typeOf } from '../sensor-types.js';
+import { entryKey, listResolver } from '../lists.js';
+import { hasLegacyPrompts, settleLegacyPrompts } from '../presets.js';
+import { macroText, repeatOf, typeOf } from '../sensor-types.js';
 import {
-    buildRequest, groupSensors, groupSpec, hasInput, measuredSensors, missingIds, momentOf, NO_INPUT, requestKey,
-    sensorSignature,
+    askedIdsOf, buildRequest, foldAnswers, groupSensors, groupSpec, hasInput, measuredSensors, missingIds, momentOf,
+    NO_INPUT, requestKey, sensorSignature,
 } from '../sensors.js';
-import { getPreset, getSettings } from '../settings.js';
+import { getPreset, getSettings, saveSettings } from '../settings.js';
 import {
     MESSAGE_MOMENT, REPLY_MOMENT, clearScores, getRecord, getScores, isNarrator, isUser, narratorIndices, userIndices,
     writeScores,
@@ -138,15 +141,39 @@ function commit(target, result, stamp, signal, fresh) {
     return true;
 }
 
-async function sharedContext(preset, settings, groups, generationType) {
-    if (!groups.some(group => group.context)) {
-        return null;
+async function sharedContexts(settings, groups, generationType) {
+    const wanted = groups.filter(group => sendsContext(group));
+    if (!wanted.length) {
+        return new Map();
     }
-    return (await buildContext(preset.contextGroups, settings.instructionsCap, generationType)).context;
+    const pieces = presentPieces(readContextGroups(generationType));
+    const counts = await countPieces(pieces);
+    const built = new Map();
+    for (const group of wanted) {
+        const key = contextKey(group);
+        if (!built.has(key)) {
+            built.set(key, (await assembleContext(pieces, group, settings.instructionsCap, counts)).context);
+        }
+    }
+    return built;
+}
+
+export function settleContextPrompts(preset) {
+    if (!hasLegacyPrompts(preset)) {
+        return;
+    }
+    const keys = promptKeys();
+    if (keys === undefined) {
+        return;
+    }
+    if (settleLegacyPrompts(preset, keys)) {
+        saveSettings();
+    }
 }
 
 function groupsFor(preset, moment, pick = null) {
-    return groupSensors(preset, { moment })
+    settleContextPrompts(preset);
+    return groupSensors(preset, { moment, entriesOf: listResolver(preset) })
         .map(group => groupSpec({ ...group, ids: pick ? group.ids.filter(pick) : group.ids }))
         .filter(group => group.ids.length);
 }
@@ -156,14 +183,14 @@ function momentSensors(preset, moment) {
 }
 
 export function missingMessageIds(preset, message) {
-    return missingIds(momentSensors(preset, MESSAGE_MOMENT), getScores(message)?.scores);
+    return missingIds(momentSensors(preset, MESSAGE_MOMENT), getScores(message)?.scores, listResolver(preset));
 }
 
-async function preparedRequests(preset, settings, groups, generationType) {
-    const shared = await sharedContext(preset, settings, groups, generationType);
+async function preparedRequests(settings, groups, generationType) {
+    const shared = await sharedContexts(settings, groups, generationType);
     const context = SillyTavern.getContext();
     const substitute = text => context.substituteParams(String(text ?? ''));
-    return (index, group) => buildRequest(context.chat, index, group, shared, substitute);
+    return (index, group) => buildRequest(context.chat, index, group, shared.get(contextKey(group)) ?? null, substitute);
 }
 
 export function liveTarget(index, generationType) {
@@ -196,7 +223,7 @@ async function runMeasurement(target, signal) {
         return SKIPPED;
     }
 
-    const build = await preparedRequests(getPreset(settings), settings, groups, target.generationType);
+    const build = await preparedRequests(settings, groups, target.generationType);
     const at = locate(target);
     if (at < 0) {
         return SKIPPED;
@@ -208,7 +235,7 @@ async function runMeasurement(target, signal) {
     const fresh = measuredCount() === 0;
     let stored = 0;
     let broke = false;
-    for (const result of results) {
+    for (const [position, result] of results.entries()) {
         if (result.status === 'rejected') {
             if (!isCancelled(result.reason)) {
                 if (current) {
@@ -218,7 +245,7 @@ async function runMeasurement(target, signal) {
             }
             continue;
         }
-        stored += commit(target, result.value, stamp, signal, fresh) ? 1 : 0;
+        stored += commit(target, foldAnswers(result.value, requests[position].plan), stamp, signal, fresh) ? 1 : 0;
     }
     if (current && results.every(result => result.status === 'fulfilled')) {
         clearError();
@@ -237,11 +264,12 @@ function askedIds(target) {
 }
 
 function askedPairs(target) {
-    return (target?.groups ?? []).flatMap(group => group.ids.map(id => `${group.key}=${id}`));
+    return (target?.groups ?? []).flatMap(group => askedIdsOf(group).map(part => `${group.key}=${part}`));
 }
 
 function incomplete(target) {
-    const missing = new Set(missingIds(measuredSensors(getPreset()), getScores(target.message)?.scores));
+    const preset = getPreset();
+    const missing = new Set(missingIds(measuredSensors(preset), getScores(target.message)?.scores, listResolver(preset)));
     return askedIds(target).some(id => missing.has(id));
 }
 
@@ -340,9 +368,22 @@ export async function askOnce(sensor) {
             : 'This chat has no reply to ask about.');
     }
     const controller = new AbortController();
-    const build = await preparedRequests(preset, settings, [group]);
-    const result = await call(build(index, group), controller.signal, { manual: true });
-    return macroText(sensor, result.scores[sensor.id]);
+    const build = await preparedRequests(settings, [group]);
+    const request = build(index, group);
+    const result = await call(request, controller.signal, { manual: true });
+    return macroText(sensor, foldAnswers(result, request.plan).scores[sensor.id]);
+}
+
+export function testEntries(sensor) {
+    const list = repeatOf(sensor);
+    return list ? listResolver(getPreset())(list) : [];
+}
+
+function emptyListProblem(sensor) {
+    const list = repeatOf(sensor);
+    return list && !testEntries(sensor).length
+        ? `The list ${list} has no entries in this chat, so there is nothing to ask.`
+        : '';
 }
 
 export async function testSensor(sensor, count, { signal, onResult } = {}) {
@@ -356,30 +397,47 @@ export async function testSensor(sensor, count, { signal, onResult } = {}) {
     const preset = { ...getPreset(settings), sensors: [{ ...sensor, id, watch: true }], rules: [] };
     const [group] = groupsFor(preset, momentOf(sensor));
     const indices = testIndices(sensor, count);
-    const build = group ? await preparedRequests(preset, settings, [group]) : null;
+    const build = group ? await preparedRequests(settings, [group]) : null;
+    const entries = testEntries(sensor);
     const rows = [];
     for (const index of indices) {
         if (signal?.aborted) {
             break;
         }
-        const row = { index, text: String(context.chat[index]?.mes ?? '') };
+        const text = String(context.chat[index]?.mes ?? '');
+        const made = [];
         try {
             if (!build) {
-                throw new Error(hasInput(sensor) ? typeOf(sensor).needs : NO_INPUT);
+                throw new Error(emptyListProblem(sensor) || (hasInput(sensor) ? typeOf(sensor).needs : NO_INPUT));
             }
-            const result = await call(build(index, group), signal);
-            row.value = result.scores[id];
-            row.confidence = result.confidence[id];
-            row.probabilities = result.probabilities[id];
+            const request = build(index, group);
+            const answers = foldAnswers(await call(request, signal), request.plan);
+            if (!entries.length) {
+                made.push({ index, text, value: answers.scores[id], confidence: answers.confidence[id], probabilities: answers.probabilities[id] });
+            } else {
+                for (const entry of entries) {
+                    const at = entryKey(entry);
+                    made.push({
+                        index,
+                        text,
+                        entry,
+                        value: answers.scores[id]?.[at],
+                        confidence: answers.confidence[id]?.[at],
+                        probabilities: answers.probabilities[id]?.[at],
+                    });
+                }
+            }
         } catch (error) {
             if (isCancelled(error)) {
                 break;
             }
-            row.error = describeError(error);
+            made.push({ index, text, error: describeError(error) });
         }
-        rows.push(row);
-        onResult?.(row, indices.length);
-        if (row.error) {
+        for (const row of made) {
+            rows.push(row);
+            onResult?.(row, indices.length * Math.max(1, entries.length));
+        }
+        if (made.some(row => row.error)) {
             break;
         }
     }
@@ -387,11 +445,13 @@ export async function testSensor(sensor, count, { signal, onResult } = {}) {
 }
 
 export function nextReplyGroups() {
-    return groupSensors(getPreset(), { moment: REPLY_MOMENT });
+    const preset = getPreset();
+    return groupSensors(preset, { moment: REPLY_MOMENT, entriesOf: listResolver(preset) });
 }
 
 export function nextMessageGroups() {
-    return groupSensors(getPreset(), { moment: MESSAGE_MOMENT });
+    const preset = getPreset();
+    return groupSensors(preset, { moment: MESSAGE_MOMENT, entriesOf: listResolver(preset) });
 }
 
 function storedAt(target) {
@@ -402,11 +462,13 @@ function storedAt(target) {
 export function planMeasurement({ limit = Infinity, all = false, sensorId = '' } = {}) {
     const context = SillyTavern.getContext();
     const preset = getPreset();
+    settleContextPrompts(preset);
+    const entriesOf = listResolver(preset);
     const tasks = [];
     let calls = 0;
 
     const plan = (indices, moment) => {
-        const built = groupSensors(preset, { moment })
+        const built = groupSensors(preset, { moment, entriesOf })
             .map(group => ({ ...group, ids: group.ids.filter(id => !sensorId || id === sensorId) }))
             .filter(group => group.ids.length);
         if (!built.length) {
@@ -418,7 +480,7 @@ export function planMeasurement({ limit = Infinity, all = false, sensorId = '' }
             if (!target) {
                 continue;
             }
-            const missing = all ? null : new Set(missingIds(wanted, storedAt(target)));
+            const missing = all ? null : new Set(missingIds(wanted, storedAt(target), entriesOf));
             const groups = built
                 .map(group => groupSpec(missing ? { ...group, ids: group.ids.filter(id => missing.has(id)) } : group))
                 .filter(group => group.ids.length);

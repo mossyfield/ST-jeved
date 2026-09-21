@@ -53,6 +53,7 @@ globalThis.fetch = async (_url, options) => {
 };
 
 const { jevedCleanUp } = await import('../index.js');
+const { runScript } = await import('../src/engine/scripts.js');
 const { forcedRule, isPaused, isRescanning, planMeasurement, rescan } = await import('../src/engine.js');
 const { getSettings } = await import('../src/settings.js');
 const { writeScores } = await import('../src/store.js');
@@ -82,7 +83,10 @@ describe('the commands Jeved registers', () => {
     it('registers one callback per command', () => {
         assert.deepEqual(
             context.commands.map(item => item.name).sort(),
-            ['jeved', 'jeved-ask', 'jeved-get', 'jeved-nudge', 'jeved-pause', 'jeved-rescan'],
+            [
+                'jeved', 'jeved-ask', 'jeved-get', 'jeved-list', 'jeved-list-add', 'jeved-list-remove',
+                'jeved-nudge', 'jeved-pause', 'jeved-rescan',
+            ],
         );
     });
 
@@ -192,6 +196,86 @@ describe('/jeved-get', () => {
         writeScores(context.chat[1], { change: 1 });
         assert.equal(get('change'), '1.0');
         assert.deepEqual(sent, []);
+    });
+});
+
+describe('the list commands', () => {
+    const entries = value => command('jeved-list').callback({}, value);
+    const add = (args, value) => command('jeved-list-add').callback(args, value);
+    const remove = (args, value) => command('jeved-list-remove').callback(args, value);
+
+    it('adds and removes by hand and hands the entries back as JSON', () => {
+        assert.equal(entries('rules'), '[]');
+        assert.equal(add({ list: 'rules' }, '  No cliffhangers '), 'No cliffhangers');
+        assert.equal(entries('rules'), '["No cliffhangers"]');
+        remove({ list: 'rules' }, 'no cliffhangers');
+        assert.equal(entries('rules'), '[]');
+    });
+
+    it('refuses a list this preset does not declare and an empty entry', () => {
+        assert.throws(() => add({ list: 'gone' }, 'x'), /No list is named gone\./);
+        assert.throws(() => entries('gone'), /No list is named gone\./);
+        assert.throws(() => add({ list: 'rules' }, '  '), /Give the entry to change\./);
+    });
+
+    it('writes a change that rolls back with the reply when a rule script makes it', async () => {
+        const reply = context.chat[1];
+        context.executeSlashCommandsWithOptions = async (_text, options) => {
+            add({ list: 'rules', _scope: options.scope }, 'no cliffhangers');
+        };
+        await runScript({ rule: { id: 'shot', script: '/jeved-list-add list=rules x' }, entries: [] }, reply);
+
+        assert.equal(entries('rules'), '["no cliffhangers"]');
+        assert.equal(context.chatMetadata.jeved_lists, undefined);
+
+        reply.extra = {};
+        assert.equal(entries('rules'), '[]');
+    });
+
+    it('drops a change whose reply was swiped away while the script was still running', async () => {
+        const reply = context.chat[1];
+        context.executeSlashCommandsWithOptions = async (_text, options) => {
+            reply.mes = 'another';
+            reply.swipe_id = 1;
+            assert.equal(add({ list: 'rules', _scope: options.scope }, 'no cliffhangers'), '');
+        };
+        await runScript({ rule: { id: 'shot', script: '/jeved-list-add list=rules x' }, entries: [] }, reply);
+
+        assert.equal(entries('rules'), '[]');
+        assert.equal(context.chatMetadata.jeved_lists, undefined);
+        assert.equal(reply.extra, undefined);
+    });
+
+    it('drops a change made after the chat changed', async () => {
+        const reply = context.chat[1];
+        context.executeSlashCommandsWithOptions = async (_text, options) => {
+            chatId = 'other';
+            assert.equal(add({ list: 'rules', _scope: options.scope }, 'no cliffhangers'), '');
+        };
+        await runScript({ rule: { id: 'shot', script: '/jeved-list-add list=rules x' }, entries: [] }, reply);
+        chatId = 'a';
+
+        assert.equal(entries('rules'), '[]');
+        assert.equal(context.chatMetadata.jeved_lists, undefined);
+    });
+
+    it('hands the script the entries it matched, and reads one out of the JSON by index', async () => {
+        let held = null;
+        context.executeSlashCommandsWithOptions = async (_text, options) => { held = options.scope; };
+        await runScript(
+            { rule: { id: 'shot', script: '/echo {{var::jeved_entry}}' }, entries: ['no cliffhangers', 'stay in scene'] },
+            context.chat[1],
+        );
+
+        assert.equal(held.getVariable('jeved_entry'), 'no cliffhangers');
+        assert.equal(held.getVariable('jeved_entries'), 'no cliffhangers\nstay in scene');
+        assert.equal(held.getVariable('jeved_entries_json', 1), 'stay in scene');
+    });
+
+    it('leaves a hand-made change alone when the reply that could hold it is swiped', () => {
+        add({ list: 'rules' }, 'stay in scene');
+        context.chat[1].extra = {};
+        assert.equal(entries('rules'), '["stay in scene"]');
     });
 });
 

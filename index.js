@@ -1,7 +1,8 @@
 import { rescanSentence } from './src/describe.js';
+import { ADD, REMOVE, listNames, listResolver, manualChange, ruleChange } from './src/lists.js';
 import { momentCount } from './src/sensors.js';
 import { MESSAGE_MOMENT } from './src/store.js';
-import { askOnce, cancelRescan, describeError, forceRule, initEngine, isRescanning, measureBlockReason, onCharacterMessage, onChatChanged, planMeasurement, rescan, setPaused } from './src/engine.js';
+import { askOnce, cancelRescan, describeError, forceRule, initEngine, invalidateMeasured, isRescanning, measureBlockReason, onCharacterMessage, onChatChanged, planMeasurement, rescan, saveChatSoon, scriptRun, runTarget, setPaused } from './src/engine.js';
 import { answerText, askSensor, initMacros } from './src/macros.js';
 import { getPreset, initSettings } from './src/settings.js';
 import { toast } from './src/toast.js';
@@ -37,6 +38,82 @@ function addWandButton() {
     item.append(icon, label);
     item.addEventListener('click', () => openSafely());
     menu.append(item);
+}
+
+function namedList(name) {
+    const preset = getPreset();
+    const wanted = String(name ?? '').trim();
+    if (!listNames(preset).includes(wanted)) {
+        throw new Error(`No list is named ${wanted}.`);
+    }
+    return { preset, name: wanted };
+}
+
+function changeList(args, value, op) {
+    const { name } = namedList(args?.list);
+    const text = String(value ?? '').trim();
+    if (!text) {
+        throw new Error('Give the entry to change.');
+    }
+    const run = scriptRun(args?._scope);
+    if (run) {
+        const target = runTarget(run);
+        if (!target) {
+            return '';
+        }
+        ruleChange(target, name, op, text);
+        saveChatSoon();
+    } else {
+        manualChange(name, op, text);
+    }
+    invalidateMeasured();
+    return text;
+}
+
+function listCommand(name, op, about) {
+    context.SlashCommandParser.addCommandObject(context.SlashCommand.fromProps({
+        name,
+        helpString: about,
+        returns: 'the entry that was changed',
+        namedArgumentList: [
+            context.SlashCommandNamedArgument.fromProps({
+                name: 'list',
+                description: 'The name of the list, as the preset declares it.',
+                typeList: [context.ARGUMENT_TYPE.STRING],
+                isRequired: true,
+            }),
+        ],
+        unnamedArgumentList: [
+            context.SlashCommandArgument.fromProps({
+                description: 'the entry',
+                typeList: [context.ARGUMENT_TYPE.STRING],
+                isRequired: true,
+            }),
+        ],
+        callback: (args, value) => changeList(args, value, op),
+    }));
+}
+
+function addListCommands() {
+    listCommand('jeved-list-add', ADD, 'Add one entry to a Jeved list in this chat. A rule script writes a change that rolls back with the message it fired on; anywhere else the change stays until you take it out.');
+    listCommand('jeved-list-remove', REMOVE, 'Take one entry out of a Jeved list in this chat. A rule script writes a change that rolls back with the message it fired on; anywhere else the change stays until you put the entry back.');
+
+    context.SlashCommandParser.addCommandObject(context.SlashCommand.fromProps({
+        name: 'jeved-list',
+        helpString: 'Return the entries of a Jeved list in this chat, as a JSON array.',
+        returns: 'a JSON array of entries',
+        unnamedArgumentList: [
+            context.SlashCommandArgument.fromProps({
+                description: 'the name of the list',
+                typeList: [context.ARGUMENT_TYPE.STRING],
+                isRequired: true,
+            }),
+        ],
+        callback: (_args, value) => {
+            const { preset, name } = namedList(value);
+            return JSON.stringify(listResolver(preset)(name));
+        },
+    }));
 }
 
 function addCommands() {
@@ -114,6 +191,14 @@ function addCommands() {
         name: 'jeved-get',
         helpString: 'Return the newest answer Jeved holds for one sensor in this chat. It makes no API call.',
         returns: 'the answer, or an empty text',
+        namedArgumentList: [
+            context.SlashCommandNamedArgument.fromProps({
+                name: 'entry',
+                description: 'One entry of the list a repeating sensor runs over.',
+                typeList: [context.ARGUMENT_TYPE.STRING],
+                isRequired: false,
+            }),
+        ],
         unnamedArgumentList: [
             context.SlashCommandArgument.fromProps({
                 description: 'the id of the sensor',
@@ -121,8 +206,10 @@ function addCommands() {
                 isRequired: true,
             }),
         ],
-        callback: (_args, value) => answerText(value),
+        callback: (args, value) => answerText(value, args?.entry ?? ''),
     }));
+
+    addListCommands();
 
     context.SlashCommandParser.addCommandObject(context.SlashCommand.fromProps({
         name: 'jeved-ask',

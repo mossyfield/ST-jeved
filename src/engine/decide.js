@@ -1,15 +1,17 @@
 import {
-    AFTER_REPLY, BEFORE_GENERATION, NUDGE, REROLL, RUN_SCRIPT, actionsInPhase, firesInPhase, replacesReply, ruleAction,
+    AFTER_REPLY, BEFORE_GENERATION, LIST_ADD, LIST_REMOVE, NUDGE, REROLL, RUN_SCRIPT, actionOf, actionsInPhase,
+    replacesReply, ruleAction,
 } from '../actions.js';
 import { MAX_PENDING_WAIT, PREPASS_TIMEOUT_MS } from '../limits.js';
+import { ADD, REMOVE, fillEntries, listResolver, ruleChange } from '../lists.js';
 import { fillMacros } from '../macros.js';
 import { rerollStarted, runReroll } from '../reroll.js';
 import { evaluate } from '../rules.js';
-import { momentOfRule } from '../sensors.js';
+import { firesInPhase, momentOfRule, phaseOfRule } from '../sensors.js';
 import { getPreset } from '../settings.js';
 import {
-    addFired, fired, firedFor, firedRule, getHistory, getRecord, getScores, isNarrator, isUser, lastUserIndex,
-    narratorIndices, repliesSince, replyPosition, setFiredValue, stripFiredText, writeDecision,
+    addFired, fired, firedFor, getHistory, getRecord, getScores, isNarrator, lastUserIndex, makeReceipt,
+    setFiredValue, sinceRuleIn, stripFiredText, writeDecision,
 } from '../store.js';
 import { toast } from '../toast.js';
 import { hashText, raceTimeout } from '../util.js';
@@ -29,33 +31,6 @@ const TIMED_OUT = 'prepass-timeout';
 const LATE_TEXT = 'Jev did not answer before the reply, so your message was not measured.';
 const SHORT_TEXT = 'Your message was not fully measured before the reply.';
 
-function sinceRuleIn(chat, preset) {
-    const replies = narratorIndices(chat).length;
-    const positions = new Map();
-    const legacy = new Set();
-    for (const message of chat) {
-        if (!isUser(message)) {
-            continue;
-        }
-        for (const entry of fired(message)) {
-            if (typeof entry?.at === 'number') {
-                positions.set(entry.rule, entry.at);
-            } else if (entry?.rule !== undefined) {
-                legacy.add(entry.rule);
-            }
-        }
-    }
-    return id => {
-        if (positions.has(id)) {
-            return replies - positions.get(id);
-        }
-        if (!legacy.has(id)) {
-            return Infinity;
-        }
-        return repliesSince(chat, firedRule(id), preset.rules.find(rule => rule.id === id)?.cooldown ?? Infinity);
-    };
-}
-
 export function historiesFor(chat, count, sensors) {
     const histories = {};
     return rule => {
@@ -71,7 +46,8 @@ export function evaluationContext(chat, preset) {
         historyOf: historiesFor(chat, lookback, preset.sensors),
         sensors: preset.sensors,
         sensorIds: preset.sensors.map(sensor => sensor.id),
-        sinceRule: sinceRuleIn(chat, preset),
+        sinceRule: sinceRuleIn(chat),
+        listEntries: listResolver(preset),
     };
 }
 
@@ -81,27 +57,41 @@ function hitsFor(chat, preset, action) {
 
 function beforeGeneration(chat, preset) {
     return actionsInPhase(BEFORE_GENERATION)
-        .flatMap(action => hitsFor(chat, preset, action.id).map(hit => ({ ...hit, action: action.id })));
+        .flatMap(action => hitsFor(chat, preset, action.id)
+            .filter(hit => phaseOfRule(hit.rule, preset.sensors) === BEFORE_GENERATION)
+            .map(hit => ({ ...hit, action: action.id })));
+}
+
+export function applyListAction(hit, message) {
+    const rule = hit.rule;
+    const list = String(rule.list ?? '').trim();
+    const op = hit.action === LIST_ADD ? ADD : REMOVE;
+    const context = SillyTavern.getContext();
+    const matched = hit.entries ?? [];
+    const wanted = matched.length ? matched : [''];
+    for (const one of wanted) {
+        const value = context.substituteParams(fillMacros(fillEntries(rule.value, matched, one)));
+        ruleChange(message, list, op, value);
+    }
 }
 
 function decide(context, preset, index, hash) {
     const forcedId = takeForcedRule();
     const forced = forcedId ? preset.rules.find(rule => rule.id === forcedId) : null;
     const hits = forced
-        ? [{ rule: forced, action: NUDGE, reason: 'Forced with /jeved-nudge.' }]
+        ? [{ rule: forced, action: NUDGE, reason: 'Forced with /jeved-nudge.', entries: [] }]
         : beforeGeneration(context.chat, preset);
 
-    const entries = hits.map(hit => {
-        const entry = { rule: hit.rule.id, action: hit.action, reason: hit.reason };
-        if (String(hit.rule.directive ?? '').trim()) {
-            entry.text = hit.rule.directive;
+    for (const hit of hits) {
+        if (actionOf(hit.action)?.usesList) {
+            applyListAction(hit, context.chat[index]);
         }
-        return entry;
-    });
-    const record = writeDecision(context.chat[index], entries, hash);
+    }
+    const entries = hits.map(hit => makeReceipt(hit, hit.action));
+    writeDecision(context.chat[index], entries, hash);
     setLastDecision({ index, fired: entries });
     notify({ index });
-    return { record, rules: hits.map(hit => hit.rule) };
+    return hits;
 }
 
 async function prePass(index) {
@@ -127,6 +117,13 @@ async function prePass(index) {
     }
 }
 
+function needsDecision(record, message, chat, index) {
+    if (record?.decided) {
+        return record.decidedHash !== hashText(message.mes);
+    }
+    return !chat.slice(index + 1).some(isNarrator);
+}
+
 export async function interceptGeneration(chat, _contextSize, _abort, type) {
     try {
         if (!isActive() || SKIPPED_TYPES.has(type)) {
@@ -141,26 +138,23 @@ export async function interceptGeneration(chat, _contextSize, _abort, type) {
         if (!String(message.mes ?? '').trim()) {
             return;
         }
-        let record = getRecord(message);
-        if (!record?.decided || record.decidedHash !== hashText(message.mes)) {
-            if (!record?.decided && context.chat.slice(index + 1).some(isNarrator)) {
-                return;
-            }
+        if (needsDecision(getRecord(message), message, context.chat, index)) {
             await Promise.all([waitForPending(MAX_PENDING_WAIT), prePass(index)]);
             if (!isActive() || SillyTavern.getContext().chat[index] !== message) {
                 return;
             }
-            const made = decide(SillyTavern.getContext(), getPreset(), index, hashText(message.mes));
-            record = made.record;
+            const hits = decide(SillyTavern.getContext(), getPreset(), index, hashText(message.mes));
             saveChatSoon();
-            for (const rule of made.rules) {
+            for (const hit of hits) {
                 if (!isActive() || SillyTavern.getContext().chat[index] !== message) {
                     break;
                 }
-                await runScript(rule);
+                await runScript(hit, message);
             }
         }
-        const texts = firedFor(message).map(entry => entry?.text).filter(text => text);
+        const texts = firedFor(message)
+            .filter(entry => entry?.text)
+            .map(entry => fillEntries(entry.text, entry.entries ?? []));
         if (!texts.length || !isActive()) {
             return;
         }
@@ -225,7 +219,7 @@ function rerollHost({ preset, message, userMessage, chatId, index, scores }) {
                 saveChatSoon();
             }
         },
-        runScript,
+        runScript: hit => runScript(hit, message),
         isAllowed: () => !!SillyTavern.getContext().swipe?.isAllowed(),
         swipeRight: () => SillyTavern.getContext().swipe.right(),
         inputHasText: () => !!document.getElementById('send_textarea')?.value.trim(),
@@ -256,36 +250,59 @@ async function tryReroll(parts) {
     }
 }
 
-function alreadyRan(userMessage, ruleId, replyHash) {
+function alreadyRan(userMessage, ruleId, action, replyHash) {
     return fired(userMessage)
-        .some(entry => entry?.rule === ruleId && entry?.action === RUN_SCRIPT && entry?.reply === replyHash);
+        .some(entry => entry?.rule === ruleId && entry?.action === action && entry?.reply === replyHash);
 }
 
-async function runScriptRules({ preset, message, userMessage, chatId, index, scores }) {
-    const replyHash = hashText(message.mes);
-    const at = replyPosition(SillyTavern.getContext().chat, index);
-    const hits = hitsFor(SillyTavern.getContext().chat, preset, RUN_SCRIPT)
-        .filter(hit => !alreadyRan(userMessage, hit.rule.id, replyHash));
+function recordFired(entry, userMessage, index) {
+    addFired(userMessage, entry);
+    const last = lastDecision();
+    setLastDecision({
+        index: last?.index ?? SillyTavern.getContext().chat.indexOf(userMessage),
+        fired: [...(last?.fired ?? []).filter(item => item.rule !== entry.rule), entry],
+    });
+    saveChatSoon();
+    notify({ index });
+}
 
-    for (const hit of hits) {
-        const current = SillyTavern.getContext();
-        if (!isActive() || current.getCurrentChatId() !== chatId || current.chat[index] !== message) {
+function lateHits({ preset, message, userMessage }, action) {
+    const replyHash = hashText(message.mes);
+    return hitsFor(SillyTavern.getContext().chat, preset, action)
+        .filter(hit => firesInPhase(hit.rule, AFTER_REPLY, preset.sensors))
+        .filter(hit => !alreadyRan(userMessage, hit.rule.id, action, replyHash));
+}
+
+function stillHere({ chatId, index, message }) {
+    const current = SillyTavern.getContext();
+    return isActive() && current.getCurrentChatId() === chatId && current.chat[index] === message;
+}
+
+async function runScriptRules(parts) {
+    const replyHash = hashText(parts.message.mes);
+    for (const hit of lateHits(parts, RUN_SCRIPT)) {
+        if (!stillHere(parts)) {
             break;
         }
-        const entry = { rule: hit.rule.id, action: RUN_SCRIPT, reason: hit.reason, reply: replyHash, at };
-        if (Object.keys(scores).length) {
-            entry.scores = scores;
-        }
-        addFired(userMessage, entry);
-        const last = lastDecision();
-        setLastDecision({
-            index: last?.index ?? current.chat.indexOf(userMessage),
-            fired: [...(last?.fired ?? []).filter(item => item.rule !== entry.rule), entry],
-        });
-        saveChatSoon();
-        notify({ index });
-        await runScript(hit.rule);
+        recordFired(makeReceipt(hit, RUN_SCRIPT, { reply: replyHash, scores: parts.scores }), parts.userMessage, parts.index);
+        await runScript(hit, parts.message);
     }
+    return false;
+}
+
+function listRunner(action) {
+    return async parts => {
+        const replyHash = hashText(parts.message.mes);
+        for (const hit of lateHits(parts, action)) {
+            if (!stillHere(parts)) {
+                break;
+            }
+            applyListAction({ ...hit, action }, parts.message);
+            recordFired(makeReceipt(hit, action, { reply: replyHash, scores: parts.scores }), parts.userMessage, parts.index);
+            await runScript(hit, parts.message);
+        }
+        return false;
+    };
 }
 
 function partsOf(preset, chatId, index, message, userMessage) {
@@ -309,10 +326,18 @@ export function waitsForScripts() {
     if (!isActive() || !SillyTavern.getContext().groupId) {
         return false;
     }
-    return getPreset().rules.some(rule => rule.enabled
-        && firesInPhase(rule, AFTER_REPLY)
+    const preset = getPreset();
+    return preset.rules.some(rule => rule.enabled
+        && firesInPhase(rule, AFTER_REPLY, preset.sensors)
         && ruleAction(rule)?.runsInGroup);
 }
+
+const AFTER_REPLY_RUNNERS = new Map([
+    [REROLL, tryReroll],
+    [LIST_ADD, listRunner(LIST_ADD)],
+    [LIST_REMOVE, listRunner(LIST_REMOVE)],
+    [RUN_SCRIPT, runScriptRules],
+]);
 
 export async function afterReply(target) {
     const context = SillyTavern.getContext();
@@ -321,7 +346,7 @@ export async function afterReply(target) {
     if (!isActive() || isRerolling()) {
         return;
     }
-    if (!preset.rules.some(rule => rule.enabled && firesInPhase(rule, AFTER_REPLY))) {
+    if (!preset.rules.some(rule => rule.enabled && firesInPhase(rule, AFTER_REPLY, preset.sensors))) {
         return;
     }
     const index = locate(target);
@@ -334,15 +359,17 @@ export async function afterReply(target) {
         return;
     }
 
-    const parts = partsOf(preset, target.chatId, index, message, userMessage);
+    let parts = partsOf(preset, target.chatId, index, message, userMessage);
     try {
-        if (!await tryReroll(parts)) {
-            await runScriptRules(parts);
-            return;
-        }
-        const newest = scriptParts(preset, target.chatId, SillyTavern.getContext().chat.length - 1);
-        if (newest) {
-            await runScriptRules(newest);
+        for (const action of actionsInPhase(AFTER_REPLY)) {
+            const run = AFTER_REPLY_RUNNERS.get(action.id);
+            if (!run || !await run(parts)) {
+                continue;
+            }
+            parts = scriptParts(preset, target.chatId, SillyTavern.getContext().chat.length - 1);
+            if (!parts) {
+                return;
+            }
         }
     } catch (error) {
         setError(error);

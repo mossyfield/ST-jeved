@@ -1,18 +1,15 @@
 import { BUILT_IN, builtInPreset } from '../defaults.js';
-import { tokenWords } from '../describe.js';
 import { sensorLabel } from '../sensor-types.js';
 import { endpointWarning } from '../classifier.js';
 import { describeError, isPaused, lastErrorKind, measureBlockReason, measuredCount, nextMessageGroups, nextReplyGroups, scriptParser, sessionCost, sessionTokens, testConnection } from '../engine.js';
-import { CONTEXT_GROUPS, TRIM_KEY, groupLabel } from '../context-groups.js';
-import { buildContext } from '../instructions.js';
 import { CONTEXT_CAP, TIMEOUT_MS } from '../limits.js';
 import { exportFileName, exportPreset, importPreset, isReservedKey, uniqueName } from '../presets.js';
 import { getPreset, getSettings, normaliseSettings, saveSettings } from '../settings.js';
 import { toast } from '../toast.js';
 import { refreshBadges } from './badge.js';
 import { hostPicker } from './hosts.js';
-import { actions, area, busy, button, checkbox, clampNumber, column, detach, editing, field, formRow, help, node, section, text, toggle, withReason } from './dom.js';
-import { ask, askForName, confirmImport, contextPopup, download, pickFile, problemsPopup } from './dialogs.js';
+import { actions, area, busy, button, clampNumber, column, editing, field, formRow, help, node, section, text, toggle, withReason } from './dom.js';
+import { ask, askForName, confirmImport, download, pickFile, problemsPopup } from './dialogs.js';
 
 let tested = false;
 
@@ -139,81 +136,16 @@ export function settingsTab(host) {
     }
 
     function contextSection() {
-        const preset = getPreset();
-        const grid = node('div', 'jeved-context', { id: 'jeved_context' });
-        const tallies = {};
-        const total = text('div', 'jeved-hint', 'Counting the context.');
-        total.id = 'jeved_context_total';
-        const cut = text('div', 'jeved-hint jeved-cut', '');
-        cut.id = 'jeved_context_cut';
-        cut.hidden = true;
-        let built = null;
-
-        for (const group of CONTEXT_GROUPS) {
-            const item = checkbox(group.label, preset.contextGroups[group.key] !== false, value => {
-                getPreset().contextGroups[group.key] = value;
-                saveSettings();
-                detach(paint());
-            });
-            item.classList.add('jeved-context-item');
-            item.querySelector('input').id = `jeved_context_${group.key}`;
-            tallies[group.key] = text('span', 'jeved-context-count', '');
-            item.append(tallies[group.key]);
-            grid.append(item);
-        }
-
-        async function paint() {
-            const settings = getSettings();
-            built = await buildContext(getPreset(settings).contextGroups, settings.instructionsCap);
-            for (const group of CONTEXT_GROUPS) {
-                const count = built.counts[group.key];
-                tallies[group.key].textContent = count === undefined ? 'empty' : (count === null ? '' : count.toLocaleString('en-US'));
-            }
-            if (built.total === null) {
-                total.textContent = 'The token count is unavailable, so Jeved sends every group you ticked.';
-            } else if (settings.instructionsCap > 0) {
-                total.textContent = `${tokenWords(built.total)} of ${settings.instructionsCap.toLocaleString('en-US')}.`;
-            } else {
-                total.textContent = `${tokenWords(built.total)}, with no cap.`;
-            }
-            const lines = [];
-            if (built.cut.length) {
-                lines.push(`Over the cap, so Jeved left out: ${built.cut.map(groupLabel).join(', ')}.`);
-            }
-            if (built.trimmed) {
-                lines.push(`The ${groupLabel(TRIM_KEY).toLowerCase()} was cut short.`);
-            }
-            if (built.over) {
-                lines.push('The main prompt and the post-history prompt alone are over the cap.');
-            }
-            cut.textContent = lines.join(' ');
-            cut.hidden = !lines.length;
-        }
-
-        const preview = button('Preview', 'Read the exact text Jeved sends', async () => {
-            if (!built) {
-                await paint();
-            }
-            await contextPopup(built);
-        });
-        preview.id = 'jeved_context_preview';
-
         const cap = field('number', getSettings().instructionsCap, '', value => {
             getSettings().instructionsCap = value;
             normaliseSettings(getSettings());
             saveSettings();
-            detach(paint());
         }, { ...CONTEXT_CAP, clamp: value => clampNumber(value, CONTEXT_CAP.min, CONTEXT_CAP.max) });
         cap.id = 'jeved_context_cap';
-        detach(paint());
 
         return section(
             'Context sent to Jev',
-            help('Sensors with Context on get the groups you tick here.'),
-            grid,
-            total,
-            cut,
-            actions(preview),
+            help('Each sensor picks what it sends, in its own form on the Sensors tab.'),
             formRow('Context cap (tokens)', cap, 'Jev accepts about 32,000 tokens per call, so leave room for the replies and the questions.'),
         );
     }

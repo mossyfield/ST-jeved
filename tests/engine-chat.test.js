@@ -12,8 +12,14 @@ const card = { system: 's', jailbreak: '', description: 'd', personality: '', sc
 let onCount = null;
 
 const basePrompts = () => ({
-    prompts: [{ identifier: 'main', content: 'Preset main.' }],
-    prompt_order: [{ character_id: 100001, order: [{ identifier: 'main', enabled: true }] }],
+    prompts: [
+        { identifier: 'main', name: 'Main Prompt', content: 'Preset main.' },
+        { identifier: 'charDescription', name: 'Char Description', marker: true },
+    ],
+    prompt_order: [{
+        character_id: 100001,
+        order: [{ identifier: 'main', enabled: true }, { identifier: 'charDescription', enabled: true }],
+    }],
 });
 
 const notices = [];
@@ -42,8 +48,9 @@ const { replayRule } = await import('../src/rules.js');
 const { call, measure, messageTarget } = await import('../src/engine/measure.js');
 const { setRerolling } = await import('../src/engine/status.js');
 const { buildContext } = await import('../src/instructions.js');
+const { listResolver, manualChange } = await import('../src/lists.js');
 const { getSettings, initSettings } = await import('../src/settings.js');
-const { fired, getHistory, getRecord, getScores, writeDecision, writeScores } = await import('../src/store.js');
+const { addFired, fired, getHistory, getRecord, getScores, writeDecision, writeScores } = await import('../src/store.js');
 const { hashText } = await import('../src/util.js');
 
 let gate = null;
@@ -392,10 +399,12 @@ describe('what a rescan reports', () => {
 });
 
 describe('the context a call carries', () => {
+    const sensorNamed = id => getSettings().presets.Director.sensors.find(sensor => sensor.id === id);
+
     it('sends what the Preview would show, and only to the sensors that asked', async () => {
         setChat('a', [user('u0'), narrator('c0')]);
         const settings = getSettings();
-        const shown = await buildContext(settings.presets.Director.contextGroups, settings.instructionsCap);
+        const shown = await buildContext(sensorNamed('tone'), settings.instructionsCap);
         await rescan(planMeasurement({ all: true }).tasks);
 
         const withContext = seen.find(one => one.ids.includes('tone'));
@@ -407,11 +416,26 @@ describe('the context a call carries', () => {
         assert.equal(withContext.state.latest_turn, 'c0');
     });
 
-    it('leaves out a group the preset turned off', async () => {
+    it('sends only the pieces a custom sensor ticked', async () => {
         setChat('a', [user('u0'), narrator('c0')]);
-        getSettings().presets.Director.contextGroups.description = false;
+        Object.assign(sensorNamed('tone'), { context: 'custom', contextPieces: ['main_prompt'] });
         await rescan(planMeasurement({ sensorId: 'tone' }).tasks);
         assert.deepEqual(seen[0].state.context, { main_prompt: 's' });
+    });
+
+    it('gives two sensors with the same selection one call, and two selections two calls', async () => {
+        setChat('a', [user('u0'), narrator('c0')]);
+        Object.assign(sensorNamed('tension'), { context: 'custom', contextPieces: ['main_prompt'] });
+        Object.assign(sensorNamed('cost'), { context: 'custom', contextPieces: ['main_prompt'] });
+        Object.assign(sensorNamed('speaks'), { context: 'custom', contextPieces: ['description'] });
+        await rescan(planMeasurement({ all: true }).tasks);
+
+        const shared = seen.find(one => one.ids.includes('tension'));
+        assert.ok(shared.ids.includes('cost'), 'the two equal selections share one call');
+        assert.deepEqual(shared.state.context, { main_prompt: 's' });
+        const other = seen.find(one => one.ids.includes('speaks'));
+        assert.equal(other.ids.includes('tension'), false);
+        assert.deepEqual(other.state.context, { description: 'd' });
     });
 });
 
@@ -455,7 +479,7 @@ describe('a prompt that only belongs to one generation type', () => {
 
         const withContext = seen.find(one => one.ids.includes('tone'));
         assert.ok(withContext, 'the sensor that reads context was measured');
-        assert.equal(withContext.state.context.other_prompts, undefined);
+        assert.equal(withContext.state.context['prompt:carry'], undefined);
         assert.equal(withContext.state.context.main_prompt, 's');
     });
 });
@@ -1013,6 +1037,19 @@ describe('the pre-pass in the interceptor', () => {
         assert.equal(getScores(lastUser()), null);
     });
 
+    it('adds the instruction of an after-reply receipt on a message it never decided', async () => {
+        withScene();
+        setChat('a', [user('u0'), narrator('c0')]);
+        addFired(context.chat[0], { rule: 'puppet', action: 'swipe', reason: 'r', text: '(OOC: again.)' });
+
+        const copy = context.chat.map(message => ({ ...message }));
+        await interceptGeneration(copy, 0, null, 'swipe');
+
+        assert.deepEqual(seen, []);
+        assert.equal(getRecord(context.chat[0]).decided, undefined);
+        assert.equal(copy[0].mes, 'u0\n\n(OOC: again.)');
+    });
+
     it('decides again when you edit the message and then swipe the reply it already has', async () => {
         withScene();
         setChat('a', [user('u0'), narrator('c0'), user('u1')]);
@@ -1503,7 +1540,8 @@ describe('a Run script rule', () => {
             context.groupId = null;
         }
 
-        const live = fired(context.chat[0]).map(entry => entry.at);
+        const positionOf = entry => context.chat.findIndex(message => hashText(message.mes) === entry.reply) - 1;
+        const live = fired(context.chat[0]).map(positionOf);
         assert.deepEqual(live, [0, 2, 4]);
 
         const preset = getSettings().presets.Director;
@@ -1552,6 +1590,144 @@ describe('a Run script rule', () => {
         const copy = context.chat.map(message => ({ ...message }));
         await interceptGeneration(copy, 0, null, 'normal');
         assert.equal(copy[2].mes, 'u1');
+    });
+});
+
+describe('a rule that changes a list', () => {
+    const listRule = (overrides = {}) => ({
+        id: 'note', label: 'Note', enabled: true, action: 'list_add',
+        conditions: [{ sensor: 'change', op: 'below', value: 99 }],
+        need: 1, window: 1, skipWhen: null, cooldown: 0, directive: '', script: '',
+        list: 'rules', value: 'no cliffhangers',
+        ...overrides,
+    });
+    const entries = () => listResolver(getSettings().presets.Director)('rules');
+    const scriptRuleFor = () => ({
+        id: 'shot', label: 'Shot', enabled: true, action: 'script',
+        conditions: [{ sensor: 'change', op: 'below', value: 99 }],
+        need: 1, window: 1, skipWhen: null, cooldown: 0, directive: '', script: '/echo shot',
+    });
+
+    it('writes the change on the reply after a reply rule fires, and loses it on a swipe', async () => {
+        getSettings().presets.Director.rules = [listRule()];
+        setChat('a', [user('u0'), narrator('c0')]);
+        onCharacterMessage(1, 'normal');
+        await settle();
+
+        assert.deepEqual(entries(), ['no cliffhangers']);
+        assert.deepEqual(fired(context.chat[0]).map(item => [item.rule, item.action]), [['note', 'list_add']]);
+
+        context.chat[1].extra = {};
+        assert.deepEqual(entries(), []);
+    });
+
+    it('runs once for one reply text and takes the entry out again on the next rule', async () => {
+        getSettings().presets.Director.rules = [listRule()];
+        setChat('a', [user('u0'), narrator('c0')]);
+        onCharacterMessage(1, 'normal');
+        await settle();
+        onCharacterMessage(1, 'normal');
+        await settle();
+        assert.equal(fired(context.chat[0]).length, 1);
+
+        getSettings().presets.Director.rules = [listRule({ id: 'drop', action: 'list_remove' })];
+        invalidateMeasured();
+        onCharacterMessage(1, 'normal');
+        await settle();
+        assert.deepEqual(entries(), []);
+    });
+
+    it('writes the change on your message before the reply when its sensors read your message', async () => {
+        withScene([listRule({ conditions: [{ sensor: 'scene', op: 'is', value: 'combat' }], value: 'scene {{jeved::scene}}' })]);
+        setChat('a', [user('u0'), narrator('c0'), user('u1')]);
+        await interceptGeneration(context.chat.map(message => ({ ...message })), 0, null, 'normal');
+
+        assert.deepEqual(entries(), ['scene combat']);
+        assert.deepEqual(getRecord(context.chat[2]).lists.map(change => change.op), ['add']);
+    });
+
+    it('adds one entry per match of a repeating rule', async () => {
+        const preset = getSettings().presets.Director;
+        preset.lists.push({ name: 'seen', entries: [] });
+        preset.rules = [listRule({
+            conditions: [{ sensor: 'house', op: 'above', value: 0.4 }],
+            list: 'seen',
+            value: 'broke: {{entry}}',
+        })];
+        setChat('a', [user('u0'), narrator('c0')]);
+        manualChange('rules', 'add', 'no cliffhangers');
+        manualChange('rules', 'add', 'stay in scene');
+        onCharacterMessage(1, 'normal');
+        await settle();
+
+        assert.deepEqual(listResolver(preset)('seen'), ['broke: no cliffhangers', 'broke: stay in scene']);
+    });
+
+    it('fires a before-reply list rule once, on your message, and not again after the reply', async () => {
+        const preset = withScene([
+            listRule({ id: 'early', conditions: [{ sensor: 'scene', op: 'is', value: 'combat' }] }),
+            scriptRuleFor(),
+        ]);
+        preset.lists = getSettings().presets.Director.lists;
+        setChat('a', [user('u0'), narrator('c0'), user('u1')]);
+        await interceptGeneration(context.chat.map(message => ({ ...message })), 0, null, 'normal');
+
+        context.chat.push(narrator('c1'));
+        invalidateMeasured();
+        onCharacterMessage(3, 'normal');
+        await settle();
+
+        assert.deepEqual(entries(), ['no cliffhangers']);
+        assert.deepEqual(getRecord(context.chat[3])?.lists, undefined);
+        assert.deepEqual(fired(context.chat[2]).map(item => item.rule), ['early', 'shot']);
+    });
+
+    it('runs the script of a list rule after it writes the change', async () => {
+        const ran = [];
+        context.executeSlashCommandsWithOptions = async script => { ran.push(script); };
+        getSettings().presets.Director.rules = [listRule({ script: '/echo added {{entry}}' })];
+        setChat('a', [user('u0'), narrator('c0')]);
+        onCharacterMessage(1, 'normal');
+        await settle();
+
+        assert.deepEqual(entries(), ['no cliffhangers']);
+        assert.deepEqual(ran, ['/echo added ']);
+    });
+
+    it('rerolls with the entries that matched written into the instruction', async () => {
+        getSettings().presets.Director.rules.find(rule => rule.id === 'house').conditions[0].value = 0.6;
+        setChat('a', [user('u0'), narrator('c0')]);
+        manualChange('rules', 'add', 'no cliffhangers');
+        const right = context.swipe.right;
+        context.swipe.right = async () => {
+            swipes.push(chatId);
+            const reply = context.chat.at(-1);
+            reply.swipes = [reply.mes, 'another'];
+            reply.swipe_id = 1;
+        };
+        try {
+            onCharacterMessage(1, 'normal');
+            await settle(40);
+        } finally {
+            context.swipe.right = right;
+        }
+
+        assert.deepEqual(swipes, ['a']);
+        const copy = context.chat.map(message => ({ ...message }));
+        await interceptGeneration(copy, 0, null, 'swipe');
+        assert.match(copy[0].mes, /Rewrite it and follow:\nno cliffhangers\)$/);
+    });
+
+    it('asks the house sensor once for each entry and stores one answer per entry', async () => {
+        setChat('a', [user('u0'), narrator('c0')]);
+        manualChange('rules', 'add', 'no cliffhangers');
+        seen.length = 0;
+        await rescan(planMeasurement({ all: true }).tasks);
+
+        const asked = seen.find(one => one.ids.some(id => id.startsWith('house')));
+        assert.deepEqual(asked.ids.filter(id => id.startsWith('house')), ['house#0']);
+        assert.equal(asked.questions['house#0'].instructions, '`latest_turn` follows this rule: no cliffhangers');
+        assert.deepEqual(Object.keys(getScores(context.chat[1]).scores.house), ['no cliffhangers']);
     });
 });
 

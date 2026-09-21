@@ -12,7 +12,7 @@ const context = hostStub({
     },
 });
 
-const { answerText, askSensor, fillMacros, initMacros } = await import('../src/macros.js');
+const { answerText, askSensor, fillMacros, initMacros, listText } = await import('../src/macros.js');
 const { macroText } = await import('../src/sensor-types.js');
 const { getSettings, initSettings } = await import('../src/settings.js');
 const { writeScores } = await import('../src/store.js');
@@ -100,10 +100,21 @@ describe('the jeved macro in a rule instruction', () => {
 });
 
 describe('registering the macro with the host', () => {
+    it('asks for the sensor only, so the one-argument form still resolves', () => {
+        assert.equal(initMacros(), true);
+        const definition = registered.get('jeved');
+        assert.deepEqual(definition.unnamedArgs.map(arg => !!arg.optional), [false, true]);
+
+        context.chat = [user('u0')];
+        writeScores(context.chat[0], { scene: 'talk' });
+        assert.equal(definition.handler({ unnamedArgs: ['scene'] }), 'talk');
+        assert.equal(registered.get('jeved-list').unnamedArgs.every(arg => !arg.optional), true);
+    });
+
     it('registers one unnamed argument and answers through the handler', () => {
         assert.equal(initMacros(), true);
         const definition = registered.get('jeved');
-        assert.equal(definition.unnamedArgs.length, 1);
+        assert.equal(definition.unnamedArgs.length, 2);
         assert.equal(typeof definition.handler, 'function');
 
         context.chat = [user('u0')];
@@ -131,12 +142,44 @@ describe('registering the macro with the host', () => {
     });
 });
 
+describe('the macros of a repeating sensor and of a list', () => {
+    const house = { id: 'house', label: 'House', watch: true, type: 'noul', repeat: 'rules', user: 1, assistant: 1, context: 'none', contextPieces: [], question: 'q', levels: [], options: [] };
+
+    function withList() {
+        const settings = setup();
+        settings.presets.Test = {
+            description: '',
+            lists: [{ name: 'rules', entries: ['No cliffhangers', 'Stay in scene'] }],
+            sensors: [house],
+            rules: [],
+        };
+        settings.activePreset = 'Test';
+        context.chat = [narrator('c0')];
+        writeScores(context.chat[0], { house: { 'no cliffhangers': 0.9, 'stay in scene': 0.2 } });
+    }
+
+    it('gives one entry, every entry and the list itself', () => {
+        withList();
+        assert.equal(answerText('house', 'No cliffhangers'), '90');
+        assert.equal(answerText('house', 'gone'), '');
+        assert.equal(answerText('house'), 'No cliffhangers: 90\nStay in scene: 20');
+        assert.equal(listText('rules'), 'No cliffhangers, Stay in scene');
+    });
+
+    it('fills both references when the host has no macro engine', () => {
+        withList();
+        assert.equal(fillMacros('[{{jeved::house::Stay in scene}}]'), '[20]');
+        assert.equal(fillMacros('[{{jeved-list::rules}}]'), '[No cliffhangers, Stay in scene]');
+        assert.equal(fillMacros('[{{jeved-list::gone}}]'), '[]');
+    });
+});
+
 describe('the sensor /jeved-ask builds', () => {
     it('defaults to a noul about the newest reply', () => {
         const sensor = askSensor({}, ' Is anyone in danger? ');
         assert.deepEqual(
             [sensor.type, sensor.user, sensor.assistant, sensor.context, sensor.question],
-            ['noul', 0, 1, false, 'Is anyone in danger?'],
+            ['noul', 0, 1, 'none', 'Is anyone in danger?'],
         );
     });
 
@@ -148,9 +191,9 @@ describe('the sensor /jeved-ask builds', () => {
 
     it('pulls the message counts into range and reads the context word', () => {
         assert.deepEqual([askSensor({ user: 99 }, 'q').user, askSensor({ assistant: -3 }, 'q').assistant], [50, 0]);
-        assert.equal(askSensor({ context: 'true' }, 'q').context, true);
-        assert.equal(askSensor({ context: 'false' }, 'q').context, false);
-        assert.equal(askSensor({ context: 'on' }, 'q').context, true);
+        assert.equal(askSensor({ context: 'true' }, 'q').context, 'all');
+        assert.equal(askSensor({ context: 'false' }, 'q').context, 'none');
+        assert.equal(askSensor({ context: 'on' }, 'q').context, 'all');
     });
 
     it('refuses a type it does not know', () => {

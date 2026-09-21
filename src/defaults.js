@@ -1,5 +1,5 @@
 import { DEFAULT_ACTION, NUDGE, REROLL, RUN_SCRIPT } from './actions.js';
-import { defaultContextGroups } from './context-groups.js';
+import { ALL_CONTEXT, NO_CONTEXT } from './context-groups.js';
 import { SCHEMA_VERSION } from './limits.js';
 import { CHOICE, NOUL, SCORE, blankLevels, seedCondition } from './sensor-types.js';
 
@@ -13,7 +13,9 @@ export function blankSensor(id) {
         type: SCORE,
         user: 1,
         assistant: 1,
-        context: false,
+        context: NO_CONTEXT,
+        contextPieces: [],
+        repeat: '',
         question: '',
         levels: blankLevels(),
         options: [],
@@ -33,11 +35,13 @@ export function blankRule(id, sensor) {
         cooldown: 0,
         directive: '',
         script: '',
+        list: '',
+        value: '',
     };
 }
 
-const reply = { type: SCORE, user: 1, assistant: 1, context: false };
-const story = { type: SCORE, user: 0, assistant: 1, context: true };
+const reply = { type: SCORE, user: 1, assistant: 1, context: NO_CONTEXT, contextPieces: [] };
+const story = { type: SCORE, user: 0, assistant: 1, context: ALL_CONTEXT, contextPieces: [] };
 
 const expressions = [
     'admiration', 'amusement', 'anger', 'annoyance', 'approval', 'caring', 'confusion', 'curiosity',
@@ -110,7 +114,8 @@ const builtInSensors = [
         type: SCORE,
         user: 0,
         assistant: 5,
-        context: false,
+        context: NO_CONTEXT,
+        contextPieces: [],
         question: 'How much does `latest_turn` reuse phrases or sentence patterns from `history`?',
         levels: [
             'Nothing is reused.',
@@ -155,7 +160,8 @@ const builtInSensors = [
         type: CHOICE,
         user: 1,
         assistant: 0,
-        context: false,
+        context: NO_CONTEXT,
+        contextPieces: [],
         question: 'What kind of scene does `player_message` ask for?',
         levels: [],
         options: [
@@ -185,7 +191,8 @@ const builtInSensors = [
         type: SCORE,
         user: 10,
         assistant: 10,
-        context: false,
+        context: NO_CONTEXT,
+        contextPieces: [],
         question: 'How close are {{char}} and {{user}} at the end of `latest_turn`?',
         levels: [
             'Strangers, or pulled back to speaking only about what has to be done.',
@@ -203,8 +210,10 @@ const builtInSensors = [
         type: NOUL,
         user: 1,
         assistant: 1,
-        context: false,
-        question: '`latest_turn` ends by asking {{user}} what they do, or by offering {{user}} a list of things they could do.',
+        context: NO_CONTEXT,
+        contextPieces: [],
+        repeat: 'rules',
+        question: '`latest_turn` follows this rule: {{entry}}',
         levels: [],
     },
     {
@@ -228,7 +237,8 @@ const builtInSensors = [
         type: NOUL,
         user: 1,
         assistant: 1,
-        context: false,
+        context: NO_CONTEXT,
+        contextPieces: [],
         question: 'The strongest image in `latest_turn` is in the scene happening now, and is not remembered, reported second-hand, imagined, or planned.',
         levels: [],
     },
@@ -239,7 +249,8 @@ const builtInSensors = [
         type: CHOICE,
         user: 0,
         assistant: 1,
-        context: false,
+        context: NO_CONTEXT,
+        contextPieces: [],
         question: 'Which emotion does {{char}} show in `latest_turn`?',
         levels: [],
         options: expressions,
@@ -396,14 +407,14 @@ const builtInRules = [
     {
         id: 'house',
         label: 'House rule',
-        enabled: false,
+        enabled: true,
         action: REROLL,
-        conditions: [{ sensor: 'house', op: 'above', value: 0.45 }],
+        conditions: [{ sensor: 'house', op: 'below', value: 0.5 }],
         need: 1,
         window: 1,
         skipWhen: null,
         cooldown: 2,
-        directive: '(OOC: Do not end the reply by asking {{user}} what they do. End on what your character does or says, and leave the next move to {{user}}.)',
+        directive: '(OOC: Your last reply broke a rule. Rewrite it and follow:\n{{entries}})',
         script: '',
     },
     {
@@ -440,10 +451,10 @@ const builtInRules = [
 export const builtInPresets = {
     [BUILT_IN]: {
         jeved: SCHEMA_VERSION,
-        description: 'Puppet rerolls a reply that writes your character. Attention, Echo, Drift and Gentle add one line to your next message when they fire. The four Scene rules read your message before the reply and steer that same reply. Five rules are off: Flat, Lore, House rule, Picture and Mood. House rule needs its statement edited first, Picture needs an image backend, and Mood needs character sprites. Closeness only measures; tick "Measure anyway" to chart it.',
+        description: 'Puppet rerolls a reply that writes your character. House rule rerolls a reply that breaks one of the house rules you keep in the "rules" list, and makes no call while that list is empty. Attention, Echo, Drift and Gentle add one line to your next message when they fire. The four Scene rules read your message before the reply and steer that same reply. Four rules are off: Flat, Lore, Picture and Mood. Picture needs an image backend and Mood needs character sprites. Closeness only measures; tick "Measure anyway" to chart it.',
+        lists: [{ name: 'rules', entries: [] }],
         sensors: builtInSensors,
         rules: builtInRules,
-        contextGroups: defaultContextGroups(),
     },
 };
 

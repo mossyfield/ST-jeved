@@ -1,7 +1,8 @@
 import { DEFAULT_ACTION, actionOf } from '../actions.js';
-import { badgeFor, levelText, ruleLabel, scoreLine } from '../describe.js';
+import { badgeFor, entryLines, levelText, ruleLabel, scoreLine } from '../describe.js';
 import { JEVED_UPDATED } from '../engine.js';
-import { hasValue } from '../sensor-types.js';
+import { fillEntries, listResolver } from '../lists.js';
+import { hasValue, repeatOf } from '../sensor-types.js';
 import { getPreset, getSettings, saveSettings } from '../settings.js';
 import { getScores, narratorIndices } from '../store.js';
 import { toast } from '../toast.js';
@@ -26,11 +27,19 @@ function scoreLines(chat, item) {
     if (!scores) {
         return ["Those answers aren't saved any more."];
     }
+    const entriesOf = listResolver(preset);
     return preset.sensors
         .filter(sensor => hasValue(sensor, scores[sensor.id]))
-        .map(sensor => scoreLine(sensor, scores[sensor.id], {
-            words: SillyTavern.getContext().substituteParams(levelText(sensor, scores[sensor.id])),
-        }));
+        .flatMap(sensor => {
+            const list = repeatOf(sensor);
+            if (list) {
+                return entryLines(sensor, scores[sensor.id], entriesOf(list))
+                    .map(line => `${sensor.label || sensor.id} - ${line}`);
+            }
+            return [scoreLine(sensor, scores[sensor.id], {
+                words: SillyTavern.getContext().substituteParams(levelText(sensor, scores[sensor.id])),
+            })];
+        });
 }
 
 async function openDetails(item) {
@@ -53,7 +62,7 @@ async function openDetails(item) {
     }
     body.append(text('h4', 'jeved-section-title', 'Instruction'));
     for (const one of item.entries) {
-        body.append(text('pre', 'jeved-script-text', one.text ?? ''));
+        body.append(text('pre', 'jeved-script-text', fillEntries(one.text ?? '', one.entries ?? [])));
     }
 
     const result = await context.callGenericPopup(body, context.POPUP_TYPE.TEXT, '', {

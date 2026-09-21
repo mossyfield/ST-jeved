@@ -1,8 +1,9 @@
 import { actionIds, isKnownAction, ruleAction } from './actions.js';
-import { CONTEXT_KEYS, groupsUpTo } from './context-groups.js';
+import { ALL_CONTEXT, CUSTOM_CONTEXT, NO_CONTEXT, isPromptKey } from './context-groups.js';
 import { blankRule, blankSensor } from './defaults.js';
 import { MESSAGES, SCHEMA_VERSION } from './limits.js';
-import { DEFAULT_TYPE, confidenceLevel, isKnownType, typeIds, typeOf } from './sensor-types.js';
+import { normaliseEntries } from './lists.js';
+import { DEFAULT_TYPE, confidenceLevel, isKnownType, repeatOf, typeIds, typeOf } from './sensor-types.js';
 import { NO_INPUT, hasInput, missesReplySensor, needsReplyProblem } from './sensors.js';
 import { clamp, isRecord } from './util.js';
 
@@ -114,6 +115,9 @@ const LATEST_TURNS = /`latest_turns`|\blatest_turns\b/g;
 const SPLIT_LABELS = '`history` and `latest_turn`';
 
 function upgradeInput(sensor) {
+    if (sensor.turns === undefined) {
+        Object.assign(sensor, { turns: 1, includeUser: true, includeContext: false });
+    }
     const turns = clamp(sensor.turns, TURNS_V1);
     sensor.assistant = turns;
     sensor.user = sensor.includeUser ? turns : 0;
@@ -140,6 +144,36 @@ function upgradeWording(sensor) {
         sensor.options = sensor.options.map(option => (isRecord(option)
             ? { ...option, description: split(option.description) }
             : option));
+    }
+    return changed;
+}
+
+export const LEGACY_PROMPTS = 'other_prompts';
+
+const LEGACY_CONTEXT_KEYS = [
+    'main_prompt', LEGACY_PROMPTS, 'description', 'personality', 'scenario', 'character_note', 'persona',
+    'post_history',
+];
+
+function sensorsOf(preset) {
+    return (Array.isArray(preset?.sensors) ? preset.sensors : []).filter(isRecord);
+}
+
+export function hasLegacyPrompts(preset) {
+    return sensorsOf(preset).some(sensor => (Array.isArray(sensor.contextPieces) ? sensor.contextPieces : [])
+        .includes(LEGACY_PROMPTS));
+}
+
+export function settleLegacyPrompts(preset, promptKeys) {
+    let changed = 0;
+    for (const sensor of sensorsOf(preset)) {
+        const stored = Array.isArray(sensor.contextPieces) ? sensor.contextPieces : [];
+        if (!stored.includes(LEGACY_PROMPTS)) {
+            continue;
+        }
+        const kept = stored.filter(key => key !== LEGACY_PROMPTS && !isPromptKey(key));
+        sensor.contextPieces = [...new Set([...kept, ...(promptKeys ?? [])])];
+        changed++;
     }
     return changed;
 }
@@ -185,6 +219,19 @@ const MIGRATIONS = new Map([
             notices.push(`Jeved 0.3 changed the wording of these sensors. Check: ${reworded.join(', ')}.`);
         }
     }],
+    [4, preset => {
+        const stored = isRecord(preset.contextGroups) ? preset.contextGroups : {};
+        const ticked = LEGACY_CONTEXT_KEYS.filter(key => stored[key] === undefined || stored[key] === true);
+        const everything = ticked.length === LEGACY_CONTEXT_KEYS.length;
+        for (const sensor of sensorsOf(preset)) {
+            const sends = !!sensor.context;
+            sensor.context = sends ? (everything ? ALL_CONTEXT : CUSTOM_CONTEXT) : NO_CONTEXT;
+            sensor.contextPieces = sends && !everything ? [...ticked] : [];
+            sensor.repeat = '';
+        }
+        preset.lists = [];
+        delete preset.contextGroups;
+    }],
 ]);
 
 function looksOlderThanTwo(preset) {
@@ -202,29 +249,11 @@ export function presetVersion(preset) {
     return isRecord(preset) && looksOlderThanTwo(preset) ? 1 : UNSTAMPED_VERSION;
 }
 
-export function normaliseContextGroups(preset) {
-    const stored = isRecord(preset.contextGroups) ? preset.contextGroups : null;
-    preset.contextGroups = Object.fromEntries(CONTEXT_KEYS.map(key => [key, stored ? stored[key] === true : true]));
-    return preset;
-}
-
 export function stampVersion(preset) {
     if (isRecord(preset)) {
         preset.jeved = SCHEMA_VERSION;
     }
     return preset;
-}
-
-function historicalDefaults(preset, version) {
-    for (const sensor of Array.isArray(preset.sensors) ? preset.sensors : []) {
-        if (isRecord(sensor) && sensor.scope === undefined && sensor.turns === undefined) {
-            Object.assign(sensor, { turns: 1, includeContext: false, includeUser: true, measureEvery: 1 });
-        }
-    }
-    const stored = isRecord(preset.contextGroups) ? preset.contextGroups : {};
-    const known = groupsUpTo(version);
-    preset.contextGroups = Object.fromEntries(CONTEXT_KEYS
-        .map(key => [key, stored[key] === undefined ? known.includes(key) : stored[key] === true]));
 }
 
 export function upgradePreset(preset, notices = []) {
@@ -235,7 +264,6 @@ export function upgradePreset(preset, notices = []) {
     if (from >= SCHEMA_VERSION) {
         return stampVersion(preset);
     }
-    historicalDefaults(preset, from);
     for (let version = from; version < SCHEMA_VERSION; version++) {
         MIGRATIONS.get(version)?.(preset, notices);
     }
@@ -283,6 +311,33 @@ export function validatePreset(data, { parse = null } = {}) {
         return ['The preset needs a list of sensors and a list of rules.'];
     }
 
+    const lists = [];
+    if (data.lists !== undefined && !Array.isArray(data.lists)) {
+        problems.push('the lists must be an array');
+    }
+    (Array.isArray(data.lists) ? data.lists : []).forEach((list, index) => {
+        const where = `list ${index + 1}`;
+        if (!isRecord(list)) {
+            problems.push(`${where}: it is not a list`);
+            return;
+        }
+        const name = String(list.name ?? '');
+        if (isReservedKey(name)) {
+            problems.push(`${where}: the name '${name}' is reserved and can't be used`);
+        } else if (!ID_PATTERN.test(name)) {
+            problems.push(`${where}: the name '${name}' can only hold lowercase letters, numbers and underscores`);
+        } else if (lists.includes(name)) {
+            problems.push(`list '${name}': two lists have that name`);
+        } else {
+            lists.push(name);
+        }
+        if (list.entries !== undefined && !Array.isArray(list.entries)) {
+            problems.push(`${where}: its entries must be an array`);
+        } else if ((list.entries ?? []).some(entry => typeof entry !== 'string')) {
+            problems.push(`${where}: every entry must be a text`);
+        }
+    });
+
     const known = [];
     const sensorIds = [];
     data.sensors.forEach((sensor, index) => {
@@ -322,6 +377,10 @@ export function validatePreset(data, { parse = null } = {}) {
         } else {
             problems.push(...typeOf(sensor).problems(sensor).map(problem => `${named}: ${problem}`));
         }
+        const repeat = repeatOf(sensor);
+        if (repeat && !lists.includes(repeat)) {
+            problems.push(`${named}: no list named '${repeat}'`);
+        }
     });
 
     const ruleIds = [];
@@ -355,11 +414,30 @@ export function validatePreset(data, { parse = null } = {}) {
             if (missesReplySensor(rule, known)) {
                 problems.push(`${named}: ${needsReplyProblem(action.ruleNoun)}`);
             }
+            const over = [...new Set(rule.conditions
+                .map(condition => repeatOf(known.find(item => item.id === String(condition?.sensor ?? ''))))
+                .filter(name => name))].sort();
+            if (over.length > 1) {
+                problems.push(`${named}: its sensors repeat over two lists, ${over.join(' and ')}`);
+            }
         }
         if (rule.skipWhen !== null && rule.skipWhen !== undefined) {
             checkCondition(rule.skipWhen, `${named}, exception`, known, problems);
+            if (repeatOf(known.find(item => item.id === String(rule.skipWhen?.sensor ?? '')))) {
+                problems.push(`${named}, exception: a sensor that repeats over a list can't be an exception`);
+            }
         }
-        if (action?.needsScript) {
+        if (action?.usesList) {
+            const list = String(rule.list ?? '').trim();
+            if (!list) {
+                problems.push(`${named}: it needs a list`);
+            } else if (!lists.includes(list)) {
+                problems.push(`${named}: no list named '${list}'`);
+            }
+            if (!String(rule.value ?? '').trim()) {
+                problems.push(`${named}: it needs a value`);
+            }
+        } else if (action?.needsScript) {
             if (!String(rule.script ?? '').trim()) {
                 problems.push(`${named}: it needs a script`);
             }
@@ -418,8 +496,12 @@ function pick(source, fields) {
 }
 
 function knownFields(preset) {
-    return normaliseContextGroups({
+    return {
         description: preset.description,
+        lists: (Array.isArray(preset.lists) ? preset.lists : []).filter(isRecord).map(list => ({
+            name: String(list.name ?? ''),
+            entries: normaliseEntries(list.entries),
+        })),
         sensors: preset.sensors.map(sensor => pick(sensor, SENSOR_FIELDS)),
         rules: preset.rules.map(rule => {
             const kept = pick(rule, RULE_FIELDS);
@@ -431,9 +513,8 @@ function knownFields(preset) {
             }
             return kept;
         }),
-        contextGroups: preset.contextGroups,
         jeved: SCHEMA_VERSION,
-    });
+    };
 }
 
 export function importPreset(data, taken = [], { parse = null } = {}) {

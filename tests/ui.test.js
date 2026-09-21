@@ -29,13 +29,13 @@ const moods = () => [
 ];
 
 const choiceSensor = () => ({
-    id: 'mood', label: 'Mood', watch: true, type: 'choice', user: 1, assistant: 1, context: false,
+    id: 'mood', label: 'Mood', watch: true, type: 'choice', user: 1, assistant: 1, context: 'none', contextPieces: [],
     question: 'Which mood fits `latest_turn`?', levels: [],
     options: moods(),
 });
 
 const scoreSensor = () => ({
-    id: 'tone', label: 'Tone', watch: true, type: 'score', user: 1, assistant: 1, context: false,
+    id: 'tone', label: 'Tone', watch: true, type: 'score', user: 1, assistant: 1, context: 'none', contextPieces: [],
     question: 'How does `latest_turn` read?',
     levels: ['a', 'b', 'c', 'd', 'e'], options: [],
 });
@@ -239,6 +239,17 @@ describe('one condition row', () => {
         assert.deepEqual(values, ['calm']);
     });
 
+    it('keeps a sensor that repeats over a list out of the exception picker only', () => {
+        setup();
+        getPreset().lists = [{ name: 'rules', entries: [] }];
+        getPreset().sensors.push({ id: 'house', label: 'House', type: 'noul', repeat: 'rules', levels: [], options: [] });
+        const condition = { sensor: 'tone', op: 'below', value: 2, minConfidence: null };
+        const names = block => block.querySelectorAll('.jeved-picker')[0].childNodes.map(item => item.value);
+
+        assert.ok(names(conditionRow(getPreset(), condition, () => {}, null)).includes('house'));
+        assert.equal(names(conditionRow(getPreset(), condition, () => {}, null, { plainOnly: true })).includes('house'), false);
+    });
+
     it('offers no confidence at all on a noul sensor', () => {
         setup();
         getPreset().sensors.push({ id: 'danger', label: 'Danger', type: 'noul', levels: [], options: [] });
@@ -308,7 +319,7 @@ describe('the sensor editor for each type', () => {
         assert.ok(labels(tab).includes('User messages'));
         assert.ok(labels(tab).includes('Assistant messages'));
         assert.ok(labels(tab).includes('Context'));
-        assert.ok(hints(tab).includes('The card and your prompts.'));
+        assert.ok(hints(tab).includes('What Jev reads besides the messages.'));
         assert.equal(hintWithId('jeved_sensor_runs').textContent, 'Runs after each reply.');
         assert.equal(hintWithId('jeved_sensor_hint').textContent, 'Refer to the reply as `latest_turn` and your message as `player_message`.');
 
@@ -345,6 +356,187 @@ describe('the sensor editor for each type', () => {
     });
 });
 
+describe('the context a sensor picks', () => {
+    const pickContext = async (tab, mode) => {
+        tab.element.querySelectorAll('.jeved-segment').find(item => item.dataset.jevedValue === mode).fire('click');
+        await settle();
+    };
+    const pieceLines = tab => tab.element.querySelectorAll('.jeved-piece')
+        .map(item => item.childNodes.slice(1).map(part => part.textContent).join(' '));
+    const tickPiece = (tab, label) => tab.element.querySelectorAll('.jeved-piece')
+        .find(item => item.childNodes[1].textContent === label).querySelector('input');
+
+    function withPreset(pieces = [], { off = [] } = {}) {
+        setup();
+        context.getCharacterCardFields = () => ({ description: 'A knight.', persona: 'A squire.', mesExamples: '' });
+        context.chatCompletionSettings = {
+            prompts: [
+                { identifier: 'main', name: 'Main Prompt', content: 'Be a narrator.' },
+                { identifier: 'style', name: 'Style', content: 'Be terse.' },
+                { identifier: 'charDescription', name: 'Char Description', marker: true },
+                { identifier: 'chatHistory', name: 'Chat History', marker: true },
+                { identifier: 'personaDescription', name: 'Persona Description', marker: true },
+            ],
+            prompt_order: [{
+                character_id: 100001,
+                order: ['main', 'style', 'charDescription', 'chatHistory', 'personaDescription']
+                    .map(identifier => ({ identifier, enabled: !off.includes(identifier) })),
+            }],
+        };
+        Object.assign(getPreset().sensors[0], { context: 'custom', contextPieces: pieces });
+    }
+
+    it('hides the checklist until Custom is picked', async () => {
+        withPreset();
+        Object.assign(getPreset().sensors[0], { context: 'none', contextPieces: [] });
+        const tab = await openSensor();
+        assert.equal(tab.element.querySelector('.jeved-fold').hidden, true);
+
+        await pickContext(tab, 'custom');
+        assert.equal(tab.element.querySelector('.jeved-fold').hidden, false);
+        assert.ok(pieceLines(tab).length > 1);
+    });
+
+    it('gives every row of the prompt order a piece, with the character note at the end', async () => {
+        withPreset();
+        const tab = await openSensor();
+        assert.deepEqual(pieceLines(tab), [
+            'Main Prompt 14',
+            'Style 9',
+            'Char Description 9',
+            'Persona Description 9',
+            'Character note empty',
+        ]);
+    });
+
+    it('leaves chat history out and marks a switched-off marker row (off)', async () => {
+        withPreset([], { off: ['charDescription'] });
+        const tab = await openSensor();
+        const lines = pieceLines(tab).join(' | ');
+        assert.doesNotMatch(lines, /Chat History/);
+        assert.match(lines, /Char Description \(off\) 9/);
+    });
+
+    it('lists a prompt that is switched off with (off), and lets it be ticked and saved', async () => {
+        withPreset([], { off: ['style'] });
+        const tab = await openSensor();
+        assert.ok(pieceLines(tab).includes('Style (off) 9'));
+
+        tickPiece(tab, 'Style (off)').checked = true;
+        tickPiece(tab, 'Style (off)').fire('change');
+        await save(tab);
+        assert.deepEqual(getPreset().sensors[0].contextPieces, ['prompt:style']);
+    });
+
+    it('says empty for a piece with no text, and still lets it be ticked', async () => {
+        withPreset();
+        const tab = await openSensor();
+        assert.ok(pieceLines(tab).includes('Character note empty'));
+
+        tickPiece(tab, 'Character note').checked = true;
+        tickPiece(tab, 'Character note').fire('change');
+        await save(tab);
+        assert.deepEqual(getPreset().sensors[0].contextPieces, ['character_note']);
+    });
+
+    it('keeps every row in prompt order, whether it is ticked or not', async () => {
+        withPreset(['persona']);
+        const tab = await openSensor();
+        assert.deepEqual(pieceLines(tab), [
+            'Main Prompt 14',
+            'Style 9',
+            'Char Description 9',
+            'Persona Description 9',
+            'Character note empty',
+        ]);
+    });
+
+    it('keeps a ticked piece that is not there right now, and says so', async () => {
+        withPreset(['prompt:gone', 'persona']);
+        const tab = await openSensor();
+        assert.ok(pieceLines(tab).includes('gone not found'));
+
+        await save(tab);
+        assert.deepEqual(getPreset().sensors[0].contextPieces, ['persona', 'prompt:gone']);
+    });
+
+    it('stores what you tick and what you untick', async () => {
+        withPreset(['persona']);
+        const tab = await openSensor();
+        tickPiece(tab, 'Style').checked = true;
+        tickPiece(tab, 'Style').fire('change');
+        tickPiece(tab, 'Persona Description').checked = false;
+        tickPiece(tab, 'Persona Description').fire('change');
+        await save(tab);
+
+        assert.equal(getPreset().sensors[0].context, 'custom');
+        assert.deepEqual(getPreset().sensors[0].contextPieces, ['prompt:style']);
+    });
+
+    it('holds the pieces while the sensor sends everything, so Custom comes back as it was', async () => {
+        withPreset(['persona']);
+        const tab = await openSensor();
+        await pickContext(tab, 'all');
+        await save(tab);
+
+        assert.equal(getPreset().sensors[0].context, 'all');
+        assert.deepEqual(getPreset().sensors[0].contextPieces, ['persona']);
+    });
+});
+
+describe('the Lists section of the Sensors tab', () => {
+    const openTab = () => {
+        const tab = sensorsTab({ refreshAll: () => {}, refreshOthers: () => {}, newRuleFrom: () => {} });
+        body.replaceChildren(tab.element);
+        return tab;
+    };
+    const chatLines = tab => tab.element.querySelectorAll('.jeved-list-entry').map(item => item.textContent);
+    const typeInto = (input, value) => {
+        input.value = value;
+        input.fire('input');
+    };
+
+    beforeEach(() => {
+        setup();
+        context.chat = [user('u0')];
+    });
+
+    it('declares a list and gives it a starting entry', async () => {
+        const tab = openTab();
+        typeInto(tab.element.querySelector('.jeved-lists').querySelector('.jeved-input'), 'House rules');
+        buttonNamed(tab.element, 'Add list').fire('click');
+        assert.deepEqual(getPreset().lists.map(list => list.name), ['house_rules']);
+
+        buttonNamed(tab.element, 'Add starting entry').fire('click');
+        typeInto(tab.element.querySelector('.jeved-list-saved').querySelector('.jeved-input'), 'no cliffhangers');
+        assert.deepEqual(getPreset().lists[0].entries, ['no cliffhangers']);
+    });
+
+    it('adds an entry to this chat, takes one out and puts a starting entry back', () => {
+        getPreset().lists = [{ name: 'rules', entries: ['one'] }];
+        const tab = openTab();
+        assert.deepEqual(chatLines(tab), ['one']);
+
+        typeInto(tab.element.querySelector('.jeved-list-chat').querySelectorAll('.jeved-input').at(-1), 'two');
+        buttonNamed(tab.element, 'Add').fire('click');
+        assert.deepEqual(chatLines(tab), ['one', 'two']);
+
+        tab.element.querySelector('.jeved-list-chat').querySelector('.jeved-btn--icon').fire('click');
+        assert.deepEqual(chatLines(tab), ['two', 'one']);
+
+        buttonNamed(tab.element, 'Restore').fire('click');
+        assert.deepEqual(chatLines(tab), ['one', 'two']);
+    });
+
+    it('tells a repeating sensor with an empty list where to add one', async () => {
+        getPreset().lists = [{ name: 'rules', entries: [] }];
+        getPreset().sensors[0].repeat = 'rules';
+        const tab = await openSensor();
+        const hint = tab.element.querySelectorAll('.jeved-hint').find(item => item.id === 'jeved_sensor_repeat_hint');
+        assert.match(hint.textContent, /^0 entries, add one in Lists/);
+    });
+});
+
 describe('the rule form for each action', () => {
     const openRule = async () => {
         const tab = rulesTab({ refreshAll: () => {}, refreshOthers: () => {} });
@@ -364,7 +556,7 @@ describe('the rule form for each action', () => {
         const tab = await openRule();
         assert.deepEqual(
             tab.element.querySelectorAll('.jeved-segment').map(item => item.dataset.jevedValue),
-            ['nudge', 'swipe', 'script'],
+            ['nudge', 'swipe', 'list_add', 'list_remove', 'script'],
         );
         assert.ok(labels(tab).includes('Instruction (OOC)'));
 
@@ -442,6 +634,23 @@ describe('the latest reply in the rule preview', () => {
         const sure = { conditions: [{ sensor: 'tone', op: 'below', value: 2, minConfidence: 0.8 }] };
         const shaky = { index: 0, scores: { tone: 1 }, confidence: { tone: 0.4 } };
         assert.deepEqual(latestLines(sure, shaky, sensorsOf()), [{ words: 'Tone: 1', match: 'Does not match' }]);
+    });
+
+    it('gives a repeating sensor one line per entry and checks each against its own answer', () => {
+        setup();
+        getPreset().lists = [{ name: 'rules', entries: [] }];
+        getPreset().sensors.push({ id: 'house', label: 'House', type: 'noul', repeat: 'rules', levels: [], options: [] });
+        const rule = { conditions: [{ sensor: 'house', op: 'above', value: 0.5, minConfidence: null }] };
+        const latest = { index: 0, scores: { house: { one: 0.9, two: 0.1 } }, confidence: {} };
+        const over = () => ['One', 'Two'];
+
+        assert.deepEqual(latestLines(rule, latest, sensorsOf(), over), [
+            { words: 'House - One: 90%', match: 'Matches' },
+            { words: 'House - Two: 10%', match: 'Does not match' },
+        ]);
+        assert.deepEqual(latestLines(rule, latest, sensorsOf(), () => []), [
+            { words: 'House: the list rules is empty', match: '' },
+        ]);
     });
 
     it('lists nothing for a rule with no conditions', () => {

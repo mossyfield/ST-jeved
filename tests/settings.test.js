@@ -36,7 +36,7 @@ describe('normaliseSettings', () => {
             presets: { a: preset({ gap: 8, maxNudges: 2, sensors: [{ id: 'a', turns: 5, includeUser: true, includeContext: true, measureEvery: 2 }] }) },
         });
         const [sensor] = settings.presets.a.sensors;
-        assert.deepEqual([sensor.user, sensor.assistant, sensor.context], [1, 1, false]);
+        assert.deepEqual([sensor.user, sensor.assistant, sensor.context], [1, 1, 'none']);
     });
 
     it('keeps a rule countable: whole numbers, at least one, and need no larger than window', () => {
@@ -54,7 +54,7 @@ describe('normaliseSettings', () => {
         const [sensor] = settings.presets.a.sensors;
         assert.equal(sensor.levels.length, 5);
         assert.equal(sensor.watch, false);
-        assert.deepEqual([sensor.user, sensor.assistant, sensor.context], [1, 1, false]);
+        assert.deepEqual([sensor.user, sensor.assistant, sensor.context], [1, 1, 'none']);
         assert.equal(settings.presets.a.rules[0].script, '');
     });
 
@@ -175,7 +175,7 @@ describe('normaliseSettings', () => {
         assert.equal(settings.activePreset, BUILT_IN);
         assert.deepEqual(settings.presets[BUILT_IN].rules.filter(rule => rule.enabled).map(rule => rule.id), [
             'puppet', 'attention', 'echo', 'drift', 'gentle',
-            'scene_combat', 'scene_conversation', 'scene_travel', 'scene_intimate',
+            'scene_combat', 'scene_conversation', 'scene_travel', 'scene_intimate', 'house',
         ]);
     });
 });
@@ -280,10 +280,9 @@ describe('initSettings', () => {
         const [tone, pace] = settings.presets.Mine.sensors;
         assert.equal(settings.schema, SCHEMA_VERSION);
         assert.equal(settings.instructionsCap, 48000);
-        assert.deepEqual([tone.user, tone.assistant, tone.context], [0, 4, true]);
-        assert.deepEqual([pace.user, pace.assistant, pace.context], [1, 1, false]);
+        assert.deepEqual([tone.user, tone.assistant, tone.context], [0, 4, 'all']);
+        assert.deepEqual([pace.user, pace.assistant, pace.context], [1, 1, 'none']);
         assert.equal(tone.question, 'Does `history` and `latest_turn` fit `context`?');
-        assert.equal(settings.presets.Mine.contextGroups.persona, true);
         assert.equal(settings.presets.Mine.storyWindow, undefined);
         assert.equal(settings.presets.Mine.jeved, SCHEMA_VERSION);
         assert.equal(counts.saveCount, 1);
@@ -297,7 +296,7 @@ describe('initSettings', () => {
         const first = structuredClone(initSettings().presets[BUILT_IN]);
         assert.equal(first.jeved, SCHEMA_VERSION);
         const repeats = first.sensors.find(sensor => sensor.id === 'repeats');
-        assert.deepEqual([repeats.type, repeats.user, repeats.assistant, repeats.context], ['score', 0, 5, false]);
+        assert.deepEqual([repeats.type, repeats.user, repeats.assistant, repeats.context], ['score', 0, 5, 'none']);
 
         const again = initSettings().presets[BUILT_IN];
         assert.deepEqual(again.sensors, first.sensors);
@@ -314,12 +313,12 @@ describe('initSettings', () => {
 
         const stored = initSettings().presets[BUILT_IN];
         const scene = stored.sensors.find(sensor => sensor.id === 'scene');
-        assert.deepEqual([scene.type, scene.user, scene.assistant, scene.context], ['choice', 1, 0, false]);
+        assert.deepEqual([scene.type, scene.user, scene.assistant, scene.context], ['choice', 1, 0, 'none']);
         assert.deepEqual(scene.options.map(option => option.name), ['combat', 'conversation', 'travel', 'intimate', 'downtime']);
         assert.ok(scene.options.every(option => option.description));
 
         const mood = stored.sensors.find(sensor => sensor.id === 'mood');
-        assert.deepEqual([mood.type, mood.user, mood.assistant, mood.context], ['choice', 0, 1, false]);
+        assert.deepEqual([mood.type, mood.user, mood.assistant, mood.context], ['choice', 0, 1, 'none']);
         assert.equal(mood.options.length, 28);
         assert.equal(mood.options.at(-1).name, 'neutral');
         assert.ok(mood.options.every(option => option.name && option.description === ''));
@@ -352,7 +351,7 @@ describe('initSettings', () => {
         });
         const stored = initSettings().presets.Mine;
         assert.deepEqual(notices, ['Jeved 0.3 changed the wording of these sensors. Check: Tone.']);
-        assert.deepEqual([stored.sensors[0].user, stored.sensors[0].assistant, stored.sensors[0].context], [0, 5, true]);
+        assert.deepEqual([stored.sensors[0].user, stored.sensors[0].assistant, stored.sensors[0].context], [0, 5, 'all']);
         assert.equal(stored.rules[0].cooldown, 7);
     });
 
@@ -370,7 +369,7 @@ describe('initSettings', () => {
         assert.deepEqual(notices, ['Jeved 0.3 changed the wording of these sensors. Check: Tone.']);
     });
 
-    it('keeps the groups a stored schema 2 preset left out of its map switched on', () => {
+    it('gives a sensor of a stored schema 2 preset the pieces its map ticked', () => {
         const extensionSettings = {
             jeved: {
                 schema: 2,
@@ -378,15 +377,20 @@ describe('initSettings', () => {
                 presets: { Mine: {
                     description: '',
                     rules: [],
-                    sensors: [{ id: 'tone', label: 'Tone', turns: 1, question: 'q', levels: ['a', 'b', 'c', 'd', 'e'] }],
+                    sensors: [
+                        { id: 'tone', label: 'Tone', turns: 1, includeContext: true, question: 'q', levels: ['a', 'b'] },
+                        { id: 'pace', label: 'Pace', turns: 1, question: 'q', levels: ['a', 'b'] },
+                    ],
                     contextGroups: { persona: false },
                 } },
             },
         };
         host(extensionSettings);
         const stored = initSettings().presets.Mine;
-        assert.equal(stored.contextGroups.persona, false);
-        assert.equal(stored.contextGroups.main_prompt, true);
+        assert.deepEqual(stored.sensors.map(item => item.context), ['custom', 'none']);
+        assert.ok(stored.sensors[0].contextPieces.includes('main_prompt'));
+        assert.equal(stored.sensors[0].contextPieces.includes('persona'), false);
+        assert.equal(stored.contextGroups, undefined);
         assert.equal(stored.jeved, SCHEMA_VERSION);
     });
 

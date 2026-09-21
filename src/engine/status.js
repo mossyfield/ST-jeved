@@ -1,4 +1,5 @@
 import { errorKind } from '../classifier.js';
+import { listResolver } from '../lists.js';
 import { measuredSensors, missingIds, momentOf, sensorSignature } from '../sensors.js';
 import { getPreset, getSettings, schemaProblem } from '../settings.js';
 import { MESSAGE_MOMENT, REPLY_MOMENT, getScores, isNarrator, isUser } from '../store.js';
@@ -178,8 +179,9 @@ export function measuredCount() {
         [REPLY_MOMENT]: wanted.filter(sensor => momentOf(sensor) === REPLY_MOMENT),
         [MESSAGE_MOMENT]: wanted.filter(sensor => momentOf(sensor) === MESSAGE_MOMENT),
     };
+    const entriesOf = listResolver(preset);
     const complete = (message, moment) => needed[moment].length > 0
-        && !missingIds(needed[moment], getScores(message)?.scores).length;
+        && !missingIds(needed[moment], getScores(message)?.scores, entriesOf).length;
     const value = context.chat.filter(message => {
         if (isNarrator(message)) {
             return complete(message, REPLY_MOMENT);

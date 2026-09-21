@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import {
-    addFired, clearScores, fired, firedFor, firedRule, getHistory, getRecord, getScores, latestScores,
-    repliesSince, stripFiredText, writeDecision, writeScores,
+    addFired, clearScores, fired, firedFor, getHistory, getRecord, getScores, latestScores, makeReceipt,
+    sinceRuleIn, stripFiredText, writeDecision, writeScores,
 } from '../src/store.js';
 import { hashText } from '../src/util.js';
 import { user } from './helpers/chat.js';
@@ -62,6 +62,40 @@ describe('writeScores', () => {
         assert.equal(getScores(message).scores.scene, 'combat');
         assert.equal(getRecord(message).decided, true);
         assert.deepEqual(fired(message).map(entry => entry.rule), ['flat']);
+    });
+});
+
+describe('the answers of a repeating sensor', () => {
+    const house = { id: 'house', label: 'House', type: 'noul', repeat: 'rules' };
+
+    it('merges a partial answer entry by entry instead of replacing the map', () => {
+        const message = narrator('one');
+        writeScores(message, { house: { one: 0.9 } });
+        writeScores(message, { house: { two: 0.2 } });
+        assert.deepEqual(getScores(message).scores.house, { one: 0.9, two: 0.2 });
+    });
+
+    it('merges the confidence of each entry the same way', () => {
+        const message = narrator('one');
+        writeScores(message, { tone: 1 }, hashText('one'), { tone: 0.5 });
+        writeScores(message, { tone: { one: 1 } }, hashText('one'), { tone: { one: 0.8 } });
+        writeScores(message, { tone: { two: 1 } }, hashText('one'), { tone: { two: 0.4 } });
+        assert.deepEqual(getScores(message).confidence.tone, { one: 0.8, two: 0.4 });
+    });
+
+    it('carries the confidence of each entry into the history, and drops a level that is not a number', () => {
+        const chat = [narrator('one')];
+        writeScores(chat[0], { house: { one: 0.9, two: 0.2 } }, hashText('one'), { house: { one: 0.8, two: 'high' } });
+        assert.deepEqual(getHistory(chat, 1, 'reply', [house])[0].confidence.house, { one: 0.8 });
+    });
+
+    it('is read as an answer only while one entry holds a usable value', () => {
+        const chat = [narrator('one')];
+        writeScores(chat[0], { house: { one: 0.9 } });
+        assert.deepEqual(getHistory(chat, 1, 'reply', [house])[0].scores.house, { one: 0.9 });
+
+        writeScores(chat[1] = narrator('two'), { house: {} });
+        assert.equal(getHistory([chat[1]], 1, 'reply', [house])[0].scores.house, undefined);
     });
 });
 
@@ -256,39 +290,85 @@ describe('confidence beside the value', () => {
     });
 });
 
-describe('repliesSince', () => {
-    it('is infinite when no user message matches', () => {
+describe('sinceRuleIn', () => {
+    const script = (rule, reply) => ({ rule, action: 'script', reason: 'r', reply });
+
+    it('is infinite for a rule with no receipt', () => {
         const chat = [user('u'), narrator('a')];
         writeDecision(chat[0], []);
-        assert.equal(repliesSince(chat, firedRule('flat')), Infinity);
+        assert.equal(sinceRuleIn(chat)('flat'), Infinity);
     });
 
-    it('counts the narrator replies after the newest user message the rule fired on', () => {
+    it('counts the replies after the user message of a receipt that names no reply', () => {
         const chat = [user('u1'), narrator('a'), user('u2'), narrator('b'), narrator('c')];
         writeDecision(chat[0], [nudge('flat')]);
-        assert.equal(repliesSince(chat, firedRule('flat')), 3);
+        assert.equal(sinceRuleIn(chat)('flat'), 3);
     });
 
     it('is zero on the turn the rule was decided', () => {
         const chat = [narrator('a'), user('u')];
         writeDecision(chat[1], [nudge('flat')]);
-        assert.equal(repliesSince(chat, firedRule('flat')), 0);
+        assert.equal(sinceRuleIn(chat)('flat'), 0);
     });
 
-    it('counts one rule at a time for its own cooldown', () => {
+    it('counts one rule at a time and takes the newest receipt of each', () => {
         const chat = [user('u1'), narrator('a'), user('u2'), narrator('b')];
         writeDecision(chat[0], [nudge('drift')]);
         writeDecision(chat[2], [nudge('flat')]);
-        assert.equal(repliesSince(chat, firedRule('drift')), 2);
-        assert.equal(repliesSince(chat, firedRule('flat')), 1);
-        assert.equal(repliesSince(chat, firedRule('gentle')), Infinity);
+        const since = sinceRuleIn(chat);
+        assert.equal(since('drift'), 2);
+        assert.equal(since('flat'), 1);
+        assert.equal(since('gentle'), Infinity);
     });
 
-    it('stops counting at the limit it is given', () => {
+    it('counts from the reply a receipt names, not from the message it sits on', () => {
         const chat = [user('u'), narrator('a'), narrator('b'), narrator('c')];
-        writeDecision(chat[0], [nudge('flat')]);
-        assert.equal(repliesSince(chat, firedRule('flat'), 2), 2);
-        assert.equal(repliesSince(chat, firedRule('flat'), 8), 3);
+        addFired(chat[0], script('shot', hashText('b')));
+        assert.equal(sinceRuleIn(chat)('shot'), 2);
+    });
+
+    it('falls back to the user message when the reply it names is gone', () => {
+        const chat = [user('u'), narrator('a'), narrator('b'), narrator('c')];
+        addFired(chat[0], script('shot', hashText('b')));
+        chat[2].mes = 'swiped';
+        assert.equal(sinceRuleIn(chat)('shot'), 3);
+    });
+
+    it('matches a reply of its own turn only', () => {
+        const chat = [user('u1'), narrator('a'), narrator('b'), user('u2'), narrator('b')];
+        addFired(chat[0], script('shot', hashText('b')));
+        assert.equal(sinceRuleIn(chat)('shot'), 2);
+    });
+
+    it('ignores a position stored by an older version', () => {
+        const chat = [user('u'), narrator('a'), narrator('b')];
+        addFired(chat[0], { ...script('shot'), at: 99 });
+        assert.equal(sinceRuleIn(chat)('shot'), 2);
+    });
+});
+
+describe('makeReceipt', () => {
+    const hit = (directive = '') => ({ rule: { id: 'flat', directive }, reason: 'because' });
+
+    it('carries the text of a rule whose action uses one', () => {
+        assert.deepEqual(makeReceipt(hit('(OOC)'), 'nudge'), { rule: 'flat', action: 'nudge', reason: 'because', text: '(OOC)' });
+        assert.equal(makeReceipt(hit('   '), 'nudge').text, undefined);
+    });
+
+    it('leaves the text off an action that adds no instruction', () => {
+        assert.equal(makeReceipt(hit('(OOC)'), 'script').text, undefined);
+    });
+
+    it('keeps the reply it was made on and the answers behind it', () => {
+        const entry = makeReceipt(hit(), 'script', { reply: 'h1', scores: { tone: 2 } });
+        assert.equal(entry.reply, 'h1');
+        assert.deepEqual(entry.scores, { tone: 2 });
+    });
+
+    it('stores no empty answers and no missing reply', () => {
+        const entry = makeReceipt(hit(), 'swipe', { scores: {} });
+        assert.equal('scores' in entry, false);
+        assert.equal('reply' in entry, false);
     });
 });
 
@@ -318,7 +398,7 @@ describe('a decision on a message that was edited', () => {
         writeDecision(message, []);
         assert.deepEqual(fired(message).map(entry => entry.rule), ['flat']);
         assert.deepEqual(firedFor(message), []);
-        assert.equal(repliesSince([message], firedRule('flat')), 0);
+        assert.equal(sinceRuleIn([message])('flat'), 0);
     });
 
     it('keeps the answers the message already had', () => {
@@ -337,18 +417,18 @@ describe('a decision on a message that was edited', () => {
 
         assert.deepEqual(firedFor(message).map(entry => entry.text), [undefined]);
         assert.deepEqual(fired(message).map(entry => entry.rule), ['flat', 'drift']);
-        assert.equal(repliesSince([message], firedRule('flat')), 0);
+        assert.equal(sinceRuleIn([message])('flat'), 0);
     });
 });
 
 describe('fired entries', () => {
-    it('adds an entry to a message that has no record yet and stamps the decision', () => {
+    it('adds an entry to a message that has no record yet, and makes no decision of it', () => {
         const message = user('u');
         addFired(message, { rule: 'long', action: 'swipe', reason: 'r', text: 't' });
         assert.deepEqual(fired(message).map(entry => entry.rule), ['long']);
         assert.deepEqual(firedFor(message).map(entry => entry.rule), ['long']);
-        assert.equal(message.extra.jeved.decided, true);
-        assert.equal(getRecord(message).decidedHash, hashText('u'));
+        assert.equal(getRecord(message).decided, undefined);
+        assert.equal(getRecord(message).decidedHash, undefined);
     });
 
     it('leaves the hash of a decision that is already there alone', () => {

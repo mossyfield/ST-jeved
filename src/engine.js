@@ -1,6 +1,7 @@
 import { afterReply, interceptGeneration, waitsForScripts } from './engine/decide.js';
 import { cancelWork, liveTarget, measure, measureMessage, saver } from './engine/measure.js';
 import { forgetSession, invalidateMeasured, isActive, isRerolling, notify, setError, setPaused as writePaused } from './engine/status.js';
+import { forgetWorldInfo, holdWorldInfo } from './instructions.js';
 import { EDIT_DELAY_MS } from './limits.js';
 import { getRecord, isNarrator } from './store.js';
 import { hashText } from './util.js';
@@ -88,6 +89,9 @@ export function initEngine() {
     if (context.eventTypes?.MESSAGE_DELETED) {
         context.eventSource.on(context.eventTypes.MESSAGE_DELETED, cancelEditTimers);
     }
+    if (context.eventTypes?.WORLD_INFO_ACTIVATED) {
+        context.eventSource.on(context.eventTypes.WORLD_INFO_ACTIVATED, holdWorldInfo);
+    }
 }
 
 export function onCharacterMessage(messageId, type) {
@@ -128,16 +132,17 @@ export function onChatChanged() {
     cancelEditTimers();
     invalidateMeasured();
     forgetSession();
+    forgetWorldInfo();
     notify();
 }
 
 export { evaluationContext, historiesFor, interceptGeneration, rerollOutcome } from './engine/decide.js';
 export {
     askOnce, cancelRescan, clearChatScores, isRescanning, nextMessageGroups, nextReplyGroups, planMeasurement,
-    plannedCalls, targetAt, testConnection, testIndices, testSensor,
+    plannedCalls, saveChatSoon, settleContextPrompts, targetAt, testConnection, testEntries, testIndices, testSensor,
 } from './engine/measure.js';
 export { rescan } from './engine/rescan.js';
-export { scriptParser } from './engine/scripts.js';
+export { runTarget, scriptParser, scriptRun } from './engine/scripts.js';
 export {
     JEVED_UPDATED, chatPreset, describeError, forceRule, forcedRule, historyStamp, invalidateMeasured,
     isActive, isMeasuring, isPaused, lastDecision, lastError, lastErrorKind, measureBlockReason,

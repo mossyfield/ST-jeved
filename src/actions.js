@@ -1,6 +1,8 @@
 export const NUDGE = 'nudge';
 export const REROLL = 'swipe';
 export const RUN_SCRIPT = 'script';
+export const LIST_ADD = 'list_add';
+export const LIST_REMOVE = 'list_remove';
 export const DEFAULT_ACTION = NUDGE;
 export const BEFORE_GENERATION = 'before-generation';
 export const AFTER_REPLY = 'after-reply';
@@ -13,13 +15,13 @@ export const ACTIONS = [
         icon: 'fa-arrow-right',
         about: 'Adds the instruction to the copy of your next message that goes into the prompt.',
         phase: BEFORE_GENERATION,
-        fireOffset: 0,
         onlyOne: false,
         presentTense: 'nudge the next turn',
         pastTense: 'nudged the next turn',
         replacesReply: false,
         runsInGroup: true,
         usesDirective: true,
+        usesList: false,
         needsScript: false,
         needsReplySensor: false,
         ruleNoun: 'nudge',
@@ -33,18 +35,58 @@ export const ACTIONS = [
         icon: 'fa-rotate',
         about: 'Swipes the reply one time and adds the instruction to that generation.',
         phase: AFTER_REPLY,
-        fireOffset: 1,
         onlyOne: true,
         presentTense: 'reroll the reply',
         pastTense: 'rerolled the reply',
         replacesReply: true,
         runsInGroup: false,
         usesDirective: true,
+        usesList: false,
         needsScript: false,
         needsReplySensor: true,
         ruleNoun: 'reroll',
         badgeTag: 'rerolled',
         badgeNote: 'The original reply is one swipe to the left.',
+    },
+    {
+        id: LIST_ADD,
+        label: 'Add to list',
+        shortLabel: 'Add',
+        icon: 'fa-plus',
+        about: 'Adds the value to a list of this chat when the rule fires.',
+        phase: '',
+        onlyOne: false,
+        presentTense: 'add the value to the list',
+        pastTense: 'added the value to the list',
+        replacesReply: false,
+        runsInGroup: true,
+        usesDirective: false,
+        usesList: true,
+        needsScript: false,
+        needsReplySensor: false,
+        ruleNoun: 'Add to list',
+        badgeTag: '',
+        badgeNote: '',
+    },
+    {
+        id: LIST_REMOVE,
+        label: 'Remove from list',
+        shortLabel: 'Remove',
+        icon: 'fa-minus',
+        about: 'Takes the value out of a list of this chat when the rule fires.',
+        phase: '',
+        onlyOne: false,
+        presentTense: 'take the value out of the list',
+        pastTense: 'took the value out of the list',
+        replacesReply: false,
+        runsInGroup: true,
+        usesDirective: false,
+        usesList: true,
+        needsScript: false,
+        needsReplySensor: false,
+        ruleNoun: 'Remove from list',
+        badgeTag: '',
+        badgeNote: '',
     },
     {
         id: RUN_SCRIPT,
@@ -53,13 +95,13 @@ export const ACTIONS = [
         icon: 'fa-terminal',
         about: "Runs the rule's script right after the reply. It adds no instruction and does not change the reply by itself.",
         phase: AFTER_REPLY,
-        fireOffset: 1,
         onlyOne: false,
         presentTense: 'run its script',
         pastTense: 'ran its script',
         replacesReply: false,
         runsInGroup: true,
         usesDirective: false,
+        usesList: false,
         needsScript: true,
         needsReplySensor: true,
         ruleNoun: 'Run script',
@@ -87,13 +129,9 @@ export function actionIds() {
 }
 
 export function actionsInPhase(phase) {
-    return ACTIONS.filter(action => action.phase === phase);
+    return ACTIONS.filter(action => !action.phase || action.phase === phase);
 }
 
 export function replacesReply(entry) {
     return !!actionOf(entry?.action)?.replacesReply;
-}
-
-export function firesInPhase(rule, phase) {
-    return ruleAction(rule)?.phase === phase;
 }

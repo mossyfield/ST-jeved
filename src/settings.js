@@ -1,14 +1,16 @@
 import { DEFAULT_ACTION, isKnownAction } from './actions.js';
 import { provider } from './classifier.js';
 import { BUILT_IN, builtInPresets } from './defaults.js';
+import { contextKeys, contextMode } from './context-groups.js';
 import { CONTEXT_CAP, MESSAGES, RULE_COOLDOWN, RULE_COUNTS, SCHEMA_VERSION, TIMEOUT_MS } from './limits.js';
-import { isReservedKey, normaliseContextGroups, presetVersion, stampVersion, upgradePreset } from './presets.js';
+import { normaliseEntries } from './lists.js';
+import { isReservedKey, presetVersion, stampVersion, upgradePreset } from './presets.js';
 import { normaliseCondition, normaliseSensor } from './sensor-types.js';
 import { toast } from './toast.js';
 import { clamp, isRecord } from './util.js';
 
 const settingsKey = 'jeved';
-const EMPTY_PRESET = { description: '', sensors: [], rules: [], contextGroups: {} };
+const EMPTY_PRESET = { description: '', sensors: [], rules: [] };
 
 let schemaAhead = 0;
 let shadow = null;
@@ -31,7 +33,6 @@ const SENSOR_NUMBERS = { user: MESSAGES, assistant: MESSAGES };
 
 export function normalisePreset(preset) {
     stampVersion(preset);
-    normaliseContextGroups(preset);
     preset.description = String(preset.description ?? '');
     preset.sensors = (Array.isArray(preset.sensors) ? preset.sensors : []).filter(isRecord);
     preset.rules = (Array.isArray(preset.rules) ? preset.rules : []).filter(isRecord);
@@ -39,11 +40,24 @@ export function normalisePreset(preset) {
     preset.sensors = preset.sensors.filter(sensor => !isReservedKey(sensor.id));
     preset.rules = preset.rules.filter(rule => !isReservedKey(rule.id));
 
+    const taken = new Set();
+    preset.lists = (Array.isArray(preset.lists) ? preset.lists : [])
+        .filter(isRecord)
+        .map(list => ({ name: String(list.name ?? ''), entries: normaliseEntries(list.entries) }))
+        .filter(list => {
+            if (!list.name || isReservedKey(list.name) || taken.has(list.name)) {
+                return false;
+            }
+            taken.add(list.name);
+            return true;
+        });
+
     for (const sensor of preset.sensors) {
         sensor.id = String(sensor.id ?? '');
         sensor.label = String(sensor.label ?? '');
         sensor.watch = !!sensor.watch;
-        sensor.context = !!sensor.context;
+        sensor.context = contextMode(sensor);
+        sensor.contextPieces = contextKeys(sensor);
         for (const [key, spec] of Object.entries(SENSOR_NUMBERS)) {
             sensor[key] = clamp(sensor[key], spec);
         }
@@ -61,6 +75,8 @@ export function normalisePreset(preset) {
         rule.cooldown = clamp(rule.cooldown, RULE_COOLDOWN);
         rule.directive = String(rule.directive ?? '');
         rule.script = String(rule.script ?? '');
+        rule.list = String(rule.list ?? '').trim();
+        rule.value = String(rule.value ?? '');
         if (!isRecord(rule.skipWhen)) {
             rule.skipWhen = null;
         }

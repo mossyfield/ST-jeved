@@ -1,4 +1,4 @@
-import { TRIM_KEY, groupLabel } from '../context-groups.js';
+import { TRIM_KEY, groupLabel, pieceLabel } from '../context-groups.js';
 import { column, node, text } from './dom.js';
 
 export async function ask(question, { ok = 'Yes', cancel = 'Cancel' } = {}) {
@@ -33,10 +33,10 @@ export async function contextPopup(built) {
     body.append(text('h3', '', 'Context sent to Jev'));
     const keys = Object.keys(built?.context ?? {});
     if (!keys.length) {
-        body.append(text('div', 'jeved-hint', 'This preset sends no context right now.'));
+        body.append(text('div', 'jeved-hint', 'This sensor sends no context right now.'));
     }
     for (const key of keys) {
-        body.append(text('div', 'jeved-context-key', `${groupLabel(key)} (${key})`));
+        body.append(text('div', 'jeved-context-key', `${pieceLabel(key)} (${key})`));
         body.append(text('pre', 'jeved-script-text', built.context[key]));
     }
     if (built?.trimmed) {

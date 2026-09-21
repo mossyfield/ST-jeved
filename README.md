@@ -1,291 +1,254 @@
 # Jeved
 
-Jeved is a SillyTavern extension. It uses Jev, a small and cheap decision model, to read the
-messages in your chat and answer questions that you write. A rule on the answers can add one line to
-the prompt, reroll the reply, or run an STscript.
+Jeved is a SillyTavern extension. It sends chat messages to Jev, a small decision model, with
+questions that you write. A rule reads the answers and acts: it adds one instruction to the prompt,
+rerolls the reply, changes a list, or runs an STscript. When no rule matches, Jeved adds nothing.
 
-Some things you can build with it:
+What you can build:
 
-- Pacing. Tell the narrator to make something happen when the story has been calm for several
-  replies, or to slow down when each reply is a new crisis.
-- Same-turn steering. Read the message you are sending and shape the reply to it, before the reply
-  is written.
-- Rerolls. Reroll a reply when the narrator speaks for your character, contradicts the character
-  card, or includes something that you do not want in your story.
-- Genre and voice. Correct the narrator when a horror story stops being frightening, or when a
-  character stops sounding like their card.
-- A world that pushes back. Notice when your character's actions never fail and never cost
-  anything, and ask for a setback.
-- Scene automation with STscript. Change the background when the location changes, make a picture
-  at a dramatic moment, switch to a stronger model for an important scene, or keep a variable such
-  as a danger level up to date.
-- Measurement only. Put a mood or a relationship on the Activity chart and see how it moves through
-  the chat. Tick "Measure anyway" in the sensor form to measure a sensor that no rule uses. The
-  built-in Closeness sensor is an example.
-
-Any question that Jev can answer from the text can be a sensor. The answer is a score, a choice
-from your list, or the chance that a statement is true. The built-in preset rerolls a reply that
-speaks for your character, and it watches attention, repeated wording, tone and pacing. It also
-shapes each reply to the kind of scene your message asks for. You can change it, write your own,
-and share a preset as one file.
-
-When no rule matches, Jeved adds nothing to your prompt, so you do not need a list of standing
-instructions that costs tokens on every turn. Jev costs a fraction of a cent for each reply.
+- Pacing: ask for an event when the story stays calm.
+- Steering: read the message you send and shape the reply to it.
+- Rerolls: reroll a reply that speaks for your character or breaks a rule that you wrote.
+- Voice: correct the narrator when the tone drifts from the card.
+- State: keep an inventory, a quest log, or a meter for each character in a list.
+- Automation: run an STscript to change the background, make a picture, or set a variable.
 
 ## Install
 
-Jeved needs SillyTavern 1.18.0 or newer.
+Needs SillyTavern 1.18.0 or later.
 
-1. In SillyTavern, open the Extensions panel and press "Install extension". Paste
-   `https://github.com/mossyfield/ST-jeved`.
-2. Open the Jeved drawer in the Extensions panel. Pick a host and paste its API key.
+1. Extensions panel > "Install extension" > paste `https://github.com/mossyfield/ST-jeved`.
+2. Open the Jeved drawer. Pick a host. Paste its API key.
 3. Press Test. Jeved makes one small call to check the key.
 4. Tick "Enabled".
 
-The built-in preset, Director, measures from the next reply. Press "Open Jeved" to see it.
+"Open Jeved", the wand menu and `/jeved` open the workspace. It has four tabs: Rules, Sensors,
+Activity, Settings. The built-in preset is Director. Open its rules to read what each one does.
 
-## How it works
+## Sensors
 
-There are three sensor types.
+A sensor is one question. There are three types.
 
-- Score. You describe a scale of 2 to 10 steps. Jev answers with a number from 0 up. The answer can
-  be between two steps, such as 1.4.
-- Choice. You name 2 to 255 options. Jev answers with one option.
-- Noul. You write a statement. Jev answers with the chance, from 0 to 100%, that the statement is
-  true.
+- Score: you write a scale of 2 to 10 steps. The answer is a number from 0 to the last step, such as 1.4.
+- Choice: you write 2 to 255 options. The answer is one option name.
+- Noul: you write a statement. The answer is the chance, 0 to 100 percent, that it is true.
 
-Each sensor chooses what Jev reads with three controls: "User messages", "Assistant messages" and
-"Context". The counts go from 0 to 50 and at least one must be above 0. Name the text in your
-question: `latest_turn` is the newest reply, `player_message` is your newest message, `history`
-holds the older messages the counts asked for, oldest first, and `context` is the card and the
-prompts you ticked under "Context sent to Jev".
+Jeved measures a sensor when an enabled rule uses it. Tick "Measure anyway" to measure a sensor
+that no rule uses.
 
-"Assistant messages" also decides when the sensor runs, and the form says which it is. At 1 or more
-it runs after each reply and judges that reply. At 0 it runs before the reply, on the message you
-are sending, so a rule on it can steer that same reply.
+### What a sensor reads
 
-A rule fires when its conditions match on N of the last M messages it reads. A condition tests one
-sensor. Score and Noul use "below" or "above" a value. Choice uses "is" or "is not" an option. A
-Score or Choice condition can also require a minimum confidence. If the host sends no confidence for
-an answer, that condition does not match there.
+- Three controls: "User messages" (0 to 50), "Assistant messages" (0 to 50), "Context".
+- At least one count must be above 0.
+- Names for the question: `latest_turn` (newest reply), `player_message` (your newest message),
+  `history` (the older messages, oldest first), `context`.
+- The hint below the question box lists the names that this sensor has.
 
-An example from the built-in preset. The Tension sensor asks "How much tension or pressure is in
-`latest_turn`?" on a scale from "None. Everyone is relaxed and safe." to "Extreme. Someone faces
-disaster right now." The Change sensor asks how much the situation changes. The Flat rule, which is
-off until you turn it on, fires when 3 of the last 4 replies have Change below 2.5 and Tension below
-1.5. It then adds this line to your
-next message: "The story has been calm for many turns. In this reply, something puts {{user}} under
-pressure or tension. How is your choice. Do not resolve it in this reply."
+### When it runs
 
-A rule can also have an exception, a cooldown, and a script. The order of the rules is the priority,
-with the first rule highest. The cooldown is the only limiter: after a rule fires it waits that many
-replies before it can fire again. Other rules are not affected.
+- "Assistant messages" 1 or more: after each reply. The sensor reads that reply.
+- "Assistant messages" 0: before the reply, on the message you send. A rule on it steers that same reply.
+- A sensor that runs before the reply adds one call for each of your messages.
+- Jeved waits at most 3 seconds for it. After that the reply goes out with no instruction.
 
-There are three actions.
+### Context
 
-- Nudge. Jeved adds the instruction to the copy of the message that goes into the prompt. It does
-  not change your message in the chat, so old instructions do not collect in the context.
-- Reroll. Jeved swipes the reply one time and adds the instruction to that generation. Jeved rerolls
-  at most one time for each of your turns, so a rule cannot loop. Jeved cancels the reroll if you
-  start to type, edit the reply, swipe, or change chat. Rerolls do not run in group chats. A reroll
-  rule needs at least one sensor that reads an assistant message.
-- Run script. Jeved runs the rule's script right after the reply is measured, so the script acts on
-  the reply that made the rule fire. It adds no instruction and does not change the reply by itself.
-  It runs one time for each reply text, it obeys the cooldown, it needs a sensor that reads an
-  assistant message, and it works in group chats.
+- None: the sensor sends no context.
+- Everything: the sensor sends each piece that is on and has text. This includes prompts that you add later.
+- Custom: "Select Prompts" opens a checklist. The sensor sends the pieces that you tick.
+- Chat completion API: the checklist is your prompt manager list, in its order, with its names.
+  Chat History has no row. The character note is one more row at the end.
+- Text completion API: the checklist is a fixed list of the same pieces.
+- "(off)": the row is off in the prompt manager. "empty": the row has no text. You can tick both.
+  Jeved sends them when they are on and have text.
+- "not found": a piece that you ticked is not in the preset. Jeved keeps the tick and sends nothing.
+- World info: the entries that the last generation activated, "before" and "after" positions only.
+  A sensor that runs before the reply reads the entries of the turn before.
+- Preview shows the exact text that the sensor sends.
 
-## Same-turn steering
+## Rules
 
-The built-in preset carries four Scene rules, on from the start. The Scene sensor is a Choice with
-"Assistant messages" at 0, so it reads only the message you are sending and answers combat,
-conversation, travel, intimate or downtime before the reply is written.
+A rule fires when its conditions match on N of the last M messages that it reads.
 
-Four rules read it, each on the latest message. "Scene: combat" adds "Write this reply as short,
-fast beats. One exchange only. Do not end the fight in this reply." "Scene: conversation", "Scene:
-travel" and "Scene: intimate" do the same for their kind of scene. Send a message that asks for a
-fight, and the instruction is in that same generation. A downtime message adds nothing.
+- A condition tests one sensor. Score and Noul: "below" or "above". Choice: "is" or "is not".
+- A Score or Choice condition can need a minimum confidence. Noul answers have no confidence.
+- An exception blocks the rule when the latest message matches it.
+- A cooldown holds the rule for that many replies after it fires. It does not affect other rules.
+- Rule order is priority. The first reroll rule that matches is the one reroll of the turn.
+- Preview in the rule form applies your draft to the stored answers. It makes no API call.
 
-A sensor that runs before the reply costs one extra API call on each of your messages, and it cannot
-see the previous reply. Jeved waits at most 3 seconds for the answer. If it is late, the reply goes
-out without the instruction and the chip in the drawer says so.
+A rule has one action.
 
-## Writing good sensors and instructions
+- Nudge: adds the instruction to the copy of your message in the prompt. Your message in the chat
+  does not change.
+- Reroll: swipes the reply one time and adds the instruction to that generation. One reroll for each
+  of your turns. Cancelled when you type, edit, swipe or change chat. Does not run in group chats.
+- Add to list, Remove from list: change one list of this chat. See "Lists".
+- Run script: runs the rule's script after the reply is measured. One time for each reply text.
+  Runs in group chats.
+- Reroll and Run script need a sensor that reads a reply.
 
-Sensors:
+## Lists
 
-- Ask about one thing. If a question contains "and", split it into two sensors.
-- Use general terms. "How much tension or pressure is in the reply" works for every story. "Is
-  someone holding a knife" works for one scene.
+A list is a named set of text lines. Each chat keeps its own entries.
+
+- The preset declares the list and its starting entries. Manage lists at the top of the Sensors tab.
+- Two presets that declare the same name share the entries of the chat.
+- A match ignores case and extra spaces. There is no cap.
+- A starting entry that you remove is struck through. Restore puts it back.
+
+A sensor that repeats over a list:
+
+- Pick the list under "Repeat over list". Write `{{entry}}` in the question, the scale or the options.
+- Jev answers one time for each entry, in the call that the sensor already makes.
+- An empty list gives the sensor no questions. It adds nothing to the call.
+- A rule on it tests each entry, and fires one time for the turn.
+- The matching entries reach the instruction, the script and the list value as `{{entry}}` (first
+  match), `{{entries}}` (one per line) and `{{entries_json}}`.
+- A script also gets the variables `jeved_entry`, `jeved_entries`, `jeved_entries_json`, `jeved_rule`.
+- Add to list and Remove from list take a list and a value. With the value `{{entry}}` they apply
+  to each matching entry.
+- Refused: a rule with repeating sensors over two lists, and a repeating sensor as an exception.
+
+What rolls back:
+
+- A change made by a rule belongs to the message that fired it. It is undone when that message is
+  swiped away, edited or deleted. It comes back when you swipe back.
+- A list command in a rule's script counts as a change made by that rule. Jeved drops it when the
+  reply was swiped away or the chat changed before the command ran.
+- A change made by you (Lists section, or a command that you type) stays until you undo it. It wins
+  over the rule changes of its turn.
+
+Director declares one list, `rules`, with no entries. Write each entry as a rule, such as "Do not
+end the reply by asking {{user}} what they do." House rule rerolls a reply that breaks an entry.
+
+## Activity
+
+- The chart shows the last 20 replies, newest on the right. An amber answer met a rule's condition.
+- A mark above a column means a rule nudged or rerolled on that turn. Pick a column for details.
+- "Measure missing" measures the messages with no answer. It states the cost first.
+- "Clear answers" removes every answer of this chat.
+- A badge marks each message where a rule fired. Turn badges off on the Settings tab.
+
+## Writing sensors and instructions
+
+- Ask about one thing. Split a question with "and" into two sensors.
 - Ask what the text shows. Put the decision in a rule.
-- Name the text in backticks, such as `latest_turn`. The hint below the question box lists the
-  names.
-- For a Score sensor, write a scale with no gaps and no overlap. The first step means none. The last
-  step means the most possible.
-- Name something visible at each step. "A real setback. The character fails, is refused, or loses
-  ground" gives better answers than "medium".
-- For a Choice sensor, keep the options far enough apart that no reply fits two of them.
+- Use general terms. "How much tension is in `latest_turn`" works for every story.
+- Score: no gaps and no overlap. The first step means none. Name something visible at each step.
+- Choice: keep the options far apart.
+- Instruction: describe the result you want in the story, for this reply, in one or two sentences.
+  Do not mention Jeved. Say what the narrator must not do when that matters.
+- Tuning: play 20 to 30 replies, then read the Activity chart. A sensor that gives the same answer
+  to each reply carries no information. Rewrite it.
+- Test in the sensor form measures the last 10 replies with your draft. It saves nothing.
 
-Instructions:
+## Hosts, cost and privacy
 
-- Describe the result you want in the story. Do not mention Jeved or a sensor's answer. Bad: "Your
-  tension score has been below 1.5 for four replies, raise it."
-- Ask for one change, in this reply. Use one or two sentences.
-- Let the narrator choose the method. "How is your choice" gives a scene that fits the story.
-- Say what the narrator must not do when that matters. "Do not resolve it in this reply" stops the
-  narrator from starting and ending a problem in one paragraph.
+- The host picker sets the endpoint and the model for OpenRouter, NanoGPT and TypeSafe. "Custom"
+  lets you type your own.
+- TypeSafe needs the SillyTavern CORS proxy: set `enableCorsProxy: true` in `config.yaml`. This
+  does not work with basic authentication.
+- OpenRouter reports cost. The other hosts report tokens. A reply costs a fraction of a cent.
+- Sensors with the same two counts and the same Context share one call. The Cost section on the
+  Settings tab lists the calls.
+- Jev takes about 32,000 tokens for each call. "Context cap (tokens)" limits the context.
+- Over the cap, Jeved leaves out, in order: world info, chat examples, preset prompts (last first),
+  persona, character note, scenario, personality. Then it cuts the description short. It never
+  cuts the main prompt or the post-history prompt.
+- A failed call never stops your chat. Jeved waits at most 2 seconds for a running measurement
+  when you send a message.
 
-Tuning:
+Privacy:
 
-- Play 20 to 30 replies, then read the chart on the Activity tab. Find a sensor whose answer changes
-  together with the problem you want to correct.
-- A sensor that gives the same answer to each reply carries no information. Rewrite it.
-- Preview on a rule applies your draft to the answers that the chat already has, with no API call.
-  Use it to set the threshold.
+- Jeved sends nothing until you tick Enabled or press a Test or Measure button. "Pause for this
+  chat" blocks all calls in that chat, except `/jeved-ask`.
+- Each call goes to the endpoint that you set. It holds the messages and the context that the
+  sensor picked, and the questions of the sensors in that call.
+- SillyTavern macros in a question are resolved first, so `{{user}}` sends your persona name.
+- The API key is stored as plain text in your SillyTavern settings file. Use a key that you can revoke.
+- Answers and decisions are stored on the messages in the chat file. Nothing is stored outside SillyTavern.
 
-## Hosts, cost, and privacy
+## Presets
 
-The host picker fills in the endpoint and the model for OpenRouter, NanoGPT and TypeSafe. Pick
-"Custom" to type your own.
+A preset holds the lists, the sensors and the rules. The buttons are on the Settings tab.
 
-- TypeSafe blocks calls from a browser, so its entry goes through the SillyTavern CORS proxy. Set
-  `enableCorsProxy: true` in your SillyTavern `config.yaml`. This route does not work when your
-  SillyTavern server uses basic authentication.
-- OpenRouter reports the cost of each call. The other hosts report tokens only.
-
-Sensors with the same "User messages", "Assistant messages" and "Context" settings share one API
-call. The Cost section on the Settings tab lists the calls and the sensors in each. The built-in
-preset makes three calls for each reply and one call for each of your messages.
-
-A failed call never stops your chat. Jeved decides with the answers that it has. If a measurement is
-still in progress when you send a message, Jeved waits at most 2 seconds for it.
-
-Jeved sends nothing until you tick Enabled, press Test, or press a Measure button. "Pause for this
-chat" blocks all of them in that chat. `/jeved-ask` is a manual command and sends its one call in
-any case. Each call goes to the endpoint you set, and it contains only:
-
-- the messages that the sensor asked for, which can be replies, your own messages, or both
-- the character card, your persona and the prompts that you ticked under "Context sent to Jev" in
-  Settings, when the sensor has Context on. Preview there shows the exact text.
-- the questions and descriptions of the sensors. Jeved resolves SillyTavern macros in them first, so
-  `{{user}}` sends your persona name.
-
-Jeved stores the API key as plain text in your SillyTavern settings file. Use a key that you can
-revoke. Jeved stores the answers and its decisions on the messages in the chat file. It stores
-nothing outside SillyTavern.
-
-## Presets and sharing
-
-A preset contains the sensors, the rules and the context checklist. The preset buttons are on the
-Settings tab.
-
-- Export writes one JSON file. The file never contains your key, endpoint or model.
-- Import lists each problem it finds in the file. It never replaces a preset. If the name is in use,
-  the new preset gets a number after its name.
-- An update of Jeved keeps the sensors and rules of your presets as you made them. Press "Restore
-  built-in" to load the new Director preset. Duplicate your copy first if you changed it.
-- Answers are stored for each sensor, not for each preset, so they stay when you switch preset. If
-  you edit a sensor so that a stored answer no longer fits it, that answer reads as "not measured".
+- Export writes one JSON file with no key, endpoint or model.
+- Import lists each problem in the file. It never replaces a preset.
+- An imported rule with a script arrives off. Read the script before you turn the rule on.
+- "Restore built-in" replaces your Director preset with the built-in one. Duplicate your copy first.
+  An update of Jeved does not change your stored presets.
+- Answers are stored for each sensor id, so they stay when you switch preset.
+- Jeved refuses a preset file from a newer Jeved. With stored settings from a newer Jeved, it is
+  read-only and the chip says "Newer settings". Update Jeved.
 
 ## Scripts
 
-A rule can run an STscript when it fires, with the instruction or in place of it. The script is
-ordinary STscript. It runs on its own, and it can do anything that you can do from the chat box,
-so the responsibility for it is yours.
+A rule can run an STscript when it fires. The script can do anything that you can do from the chat
+box. Jeved refuses a script that SillyTavern cannot parse, and waits at most 5 seconds for it.
 
-- Jeved refuses to save a rule whose script SillyTavern cannot parse.
-- Imported rules that have a script arrive turned off. The import dialog shows each script in full.
-  Read it before you turn the rule on.
-- Jeved waits at most 5 seconds for a script. Then the generation continues while the script runs.
+When it runs:
 
-When the script runs depends on the action of the rule:
-
-- Nudge, on a rule that reads replies: when you send your next message, before the generation.
-- Nudge, on a rule that reads only your message: before the reply to that message.
+- Nudge on a rule that reads replies: when you send your next message.
+- Nudge on a rule that reads only your message: before the reply to that message.
 - Reroll: after the reply, before the swipe.
-- Run script: right after the reply is measured.
+- Add to list, Remove from list: with the list change.
+- Run script: after the reply is measured, after any reroll and list change of that turn.
 
-The Picture rule in the built-in preset is an example. It uses the Run script action, it is off,
-and it needs an image backend. Two conditions must hold on the same reply: the Striking image
-sensor above 3.6, and the Happening now sensor above 50%, so the picture is of the scene in front
-of you and not of a memory or a plan.
+Examples:
 
-```
-/imagine scene
-```
-
-`/imagine` posts the picture into the chat as a message. Add `quiet=true` if you do not want that.
-
-The Mood rule is a second example. It is off, it needs character sprites, and it runs
-`/expression-set {{jeved::mood}}` with the emotion that the Mood sensor picked for the reply.
-
-A Run script rule can run a Quick Reply:
-
-```
-/run QuickReplySet.MyRewrite
-```
-
-It can also run the slash command of another extension. `{{jeved::sensor_id}}` in a script gives the
-newest answer of that sensor.
+- `/imagine scene` posts a picture of the scene. Needs an image backend.
+- `/expression-set {{jeved::mood}}` sets the sprite from a Choice sensor with the id `mood`.
+- `/run QuickReplySet.MyRewrite` runs a Quick Reply.
 
 ## Slash commands
 
-- `/jeved` opens the workspace. `/jeved activity` opens it on that tab.
-- `/jeved-nudge rule=<rule id>` adds the instruction of that rule to your next message one time,
-  even when the rule does not match.
-- `/jeved-pause on` stops Jeved in this chat. `/jeved-pause off` starts it again.
-- `/jeved-rescan count=<n>` measures the recent messages that have no answer. The count applies to
-  your messages and to replies separately. It asks first.
-- `/jeved-get <sensor id>` returns the newest answer Jeved holds for that sensor in this chat. It
-  makes no API call.
-- `/jeved-ask <question>` makes one call and returns the answer without storing it. It works while
-  the chat is paused. The named arguments are `type=score|choice|noul` (noul by default),
-  `options="a,b,c"` for a choice, `levels="a|b|c"` for a score, `user=<n>` (0), `assistant=<n>` (1)
-  and `context=true|false` (false). With `assistant=0` it asks about your newest message. On any
-  problem it shows a message and returns an empty text.
+- `/jeved [tab]`: opens the workspace.
+- `/jeved-nudge rule=<rule id>`: adds that rule's instruction to your next message one time. A chat
+  change cancels it.
+- `/jeved-pause on|off`: stops or starts Jeved in this chat.
+- `/jeved-rescan count=<n>`: measures recent messages with no answer. Default 20. It asks first.
+  Run it again to stop it.
+- `/jeved-get <sensor id>`: the newest answer. No API call. `entry=<text>` reads one entry.
+- `/jeved-list <name>`: the entries of the list, as a JSON array.
+- `/jeved-list-add list=<name> <text>`, `/jeved-list-remove list=<name> <text>`: change a list.
+- `/jeved-ask <question>`: one call. Returns the answer and stores nothing. Works while paused.
+  - `type=score|choice|noul` (default noul)
+  - `options="a,b,c"` for Choice, `levels="a|b|c"` for Score
+  - `user=<n>` (default 0), `assistant=<n>` (default 1), `context=true|false` (default false)
 
-## Macro
+## Macros
 
-`{{jeved::<sensor id>}}` gives the newest answer that Jeved has for that sensor in this chat.
+- `{{jeved::<sensor id>}}`: the newest answer. Score `2.4`. Choice: the option name. Noul: whole
+  percent, `85`. No answer: empty.
+- `{{jeved::<sensor id>::<entry>}}`: the answer for one entry of a repeating sensor.
+- `{{jeved::<sensor id>}}` on a repeating sensor: one `entry: answer` line for each entry.
+- `{{jeved-list::<list name>}}`: the entries, joined with commas.
+- They work in an instruction, a message, a Quick Reply and an STscript argument. They need the
+  SillyTavern macro engine, which is on by default.
 
-- Score: the number with one decimal, such as `2.4`.
-- Choice: the option name.
-- Noul: a whole percent, such as `85`.
-- No answer yet: an empty text.
+## For automation
 
-In a rule instruction, Jeved replaces the macro itself. This works with each macro engine. In a
-message, a Quick Reply or an STscript argument, the macro needs the default SillyTavern macro engine.
-That engine is on unless you turned it off.
+A tool with file access can edit presets in `data/<user>/settings.json`, at
+`extension_settings.jeved.presets["<preset name>"]`. The same object holds the API key. Do not
+print it or copy it.
 
-## For coding agents
-
-An agent with file access can edit presets directly. They are in the SillyTavern settings file,
-`data/<user>/settings.json`, at `extension_settings.jeved.presets["<preset name>"]`. The same object
-holds the API key. Do not print it or copy it.
-
-1. Ask the user to close every SillyTavern tab. An open tab overwrites your edit when it saves.
-2. Edit only the `jeved.presets` part of the file. `blankSensor` and `blankRule` in
-   `src/defaults.js` show the fields and the defaults. The built-in preset in the same file is a
-   complete example. Give each new sensor and rule a unique `id`. If you rename a Choice option,
-   also change the rule conditions that use the old name.
-3. Validate the preset. Run this in the extension folder:
+1. Ask the user to close every SillyTavern tab. An open tab overwrites your edit.
+2. Edit only `jeved.presets`. `blankSensor` and `blankRule` in `src/defaults.js` hold the fields.
+   Give each sensor and rule a unique `id`.
+3. Validate. Run this in the extension folder. `[]` means valid. Only the app checks scripts.
 
    ```
    node --input-type=module -e "import { readFileSync } from 'node:fs'; import { validatePreset } from './src/presets.js'; const [file, name] = process.argv.slice(1); console.log(validatePreset(JSON.parse(readFileSync(file, 'utf8')).extension_settings.jeved.presets[name]));" ../../settings.json Director
    ```
 
-   `[]` means the preset is valid. Any other output lists each problem. Only the app checks scripts.
 4. Ask the user to open SillyTavern again.
-
-To share a preset, write a file for the user to import. Export a preset to see the exact shape.
 
 ## Uninstall
 
-Open the Extensions panel, find Jeved and delete it. Tick "Also clean up extension data" in the
-confirmation dialog to remove the Jeved settings, including the API key. If you do not tick it, the
-settings and the key stay in the SillyTavern settings file.
-
-The answers and decisions that Jeved wrote on your messages stay in the chat files. "Clear answers"
-on the Activity tab removes the answers from the current chat.
+- Extensions panel > Jeved > delete. Tick "Also clean up extension data" to remove the settings
+  and the API key.
+- Answers stay in the chat files. "Clear answers" on the Activity tab removes them for one chat.
 
 ## Licence
 

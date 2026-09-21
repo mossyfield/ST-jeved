@@ -1,17 +1,21 @@
+import {
+    ALL_CONTEXT, CUSTOM_CONTEXT, NO_CONTEXT, contextKeys, contextMode, pieceLabel, sendsContext,
+} from '../context-groups.js';
 import { blankSensor } from '../defaults.js';
 import { excerpt, listPhrase, momentLine, momentTag, questionKeysHint, rescanSentence, sensorProblem, tokenWords } from '../describe.js';
-import { describeError, measureBlockReason, planMeasurement, rescan, testIndices, testSensor } from '../engine.js';
-import { buildContext, countTokens } from '../instructions.js';
+import { describeError, invalidateMeasured, measureBlockReason, planMeasurement, rescan, settleContextPrompts, testEntries, testIndices, testSensor } from '../engine.js';
+import { buildContext, contextChecklist, countPieces, countTokens } from '../instructions.js';
 import { LEVELS, MESSAGES, OPTIONS } from '../limits.js';
+import { ADD, REMOVE, forgetManual, hiddenEntries, listResolver, manualChange, normaliseEntry, presetLists, restoreEntry } from '../lists.js';
 import { legacyReference, renameOption, slugId, validatePreset } from '../presets.js';
-import { CHOICE, NOUL, SENSOR_TYPES, sensorLabel, typeOf, valueText } from '../sensor-types.js';
+import { CHOICE, NOUL, SENSOR_TYPES, repeatOf, sensorLabel, typeOf, valueText } from '../sensor-types.js';
 import { buildRequest, groupKeyOf, groupSensors, missesReplySensor, momentCount, momentOf, momentWord } from '../sensors.js';
 import { getPreset, getSettings, normalisePreset, saveSettings } from '../settings.js';
 import { currentChat, latestScores } from '../store.js';
 import { toast } from '../toast.js';
 import { isRecord } from '../util.js';
-import { actions, area, busy, button, column, detach, field, formRow, help, iconButton, node, note, resultsBox, row, section, segmented, setLabel, slider, text, toggle, toolbar, withReason } from './dom.js';
-import { ask } from './dialogs.js';
+import { actions, area, busy, button, checkbox, column, detach, field, fold, formRow, help, iconButton, node, note, picker, resultsBox, row, section, segmented, setLabel, slider, text, toggle, toolbar, withReason } from './dom.js';
+import { ask, contextPopup } from './dialogs.js';
 import { masterDetail } from './master.js';
 
 const TEST_REPLIES = 10;
@@ -22,6 +26,12 @@ const SPREAD_TOP = 5;
 const COUNT_RANGE = { min: MESSAGES.min, max: MESSAGES.max, step: 1, decimals: 0 };
 
 const TYPE_OPTIONS = SENSOR_TYPES.map(type => ({ value: type.id, label: type.label }));
+
+const CONTEXT_OPTIONS = [
+    { value: NO_CONTEXT, label: 'None' },
+    { value: ALL_CONTEXT, label: 'Everything' },
+    { value: CUSTOM_CONTEXT, label: 'Custom' },
+];
 
 function usedBy(preset, id, match = () => true) {
     return preset.rules.filter(rule => [...rule.conditions, rule.skipWhen]
@@ -121,14 +131,17 @@ function testNote(row) {
 function testBlock(draft, takenIds, api) {
     const moment = () => momentOf(draft);
     const count = () => testIndices(draft, TEST_REPLIES).length;
-    const nothing = () => `This chat has no ${momentWord(moment())} to test yet.`;
+    const emptyList = () => !!repeatOf(draft) && !testEntries(draft).length;
+    const nothing = () => (emptyList()
+        ? `The list ${repeatOf(draft)} has no entries in this chat, so there is nothing to ask.`
+        : `This chat has no ${momentWord(moment())} to test yet.`);
     const caption = () => (count()
         ? `Test on last ${momentCount(moment(), count())} (${count()} API calls)`
         : 'Test');
     const scored = rows => rows.filter(row => !row.error).map(row => ({
         index: row.index,
         tag: valueText(draft, row.value, ''),
-        note: testNote(row),
+        note: [row.entry, testNote(row)].filter(part => part).join(' · '),
         text: excerpt(row.text),
         full: String(row.text ?? ''),
     }));
@@ -178,11 +191,11 @@ function testBlock(draft, takenIds, api) {
     function paint() {
         const blocked = measureBlockReason();
         run.title = blocked || 'Measure the recent replies with this wording';
-        hint.textContent = blocked || (count() ? '' : nothing());
+        hint.textContent = blocked || (count() && !emptyList() ? '' : nothing());
         if (controller) {
             return;
         }
-        busy(run, !count() || !!blocked);
+        busy(run, !count() || emptyList() || !!blocked);
         setLabel(run, caption());
     }
 
@@ -192,11 +205,11 @@ function testBlock(draft, takenIds, api) {
     return { element: section('Test', toolbar(run, hint), box.element), paint };
 }
 
-async function requestTokens(draft, preset) {
+async function requestTokens(draft) {
     const settings = getSettings();
     let total = 0;
-    if (draft.context) {
-        const built = await buildContext(preset.contextGroups, settings.instructionsCap);
+    if (sendsContext(draft)) {
+        const built = await buildContext(draft, settings.instructionsCap);
         if (built.total === null) {
             return null;
         }
@@ -224,7 +237,7 @@ function readsBlock(preset, draft, saved, api) {
         const others = (group?.sensors ?? [])
             .filter(sensor => sensor.id !== saved?.id)
             .map(sensor => sensorLabel(preset.sensors, sensor.id));
-        const tokens = await requestTokens(draft, preset);
+        const tokens = await requestTokens(draft);
         const parts = [];
         if (tokens !== null) {
             parts.push(`${tokenWords(tokens)}.`);
@@ -241,6 +254,73 @@ function readsBlock(preset, draft, saved, api) {
     api.onClose(() => schedule.cancel());
     detach(paint());
     return { element: formRow('Call size', column('', line, crowded)), schedule };
+}
+
+function contextBlock(draft, onChange) {
+    const list = node('div', 'jeved-pieces');
+    const picker = fold('Select Prompts', list);
+    picker.id = 'jeved_sensor_pieces';
+    const preview = button('Preview', 'Read the exact text this sensor sends', async () => {
+        await contextPopup(await buildContext(draft, getSettings().instructionsCap));
+    });
+    preview.id = 'jeved_context_preview';
+
+    function tally(piece, counts) {
+        if (piece.missing) {
+            return 'not found';
+        }
+        if (!piece.text) {
+            return 'empty';
+        }
+        const count = counts[piece.key];
+        return count === null ? '' : count.toLocaleString('en-US');
+    }
+
+    function pieceRow(piece, ticked, counts) {
+        const item = checkbox(piece.off ? `${piece.label} (off)` : piece.label, ticked, value => {
+            const kept = contextKeys(draft).filter(key => key !== piece.key);
+            draft.contextPieces = value ? [...kept, piece.key] : kept;
+            onChange();
+        });
+        item.classList.add('jeved-piece');
+        if (piece.missing) {
+            item.classList.add('jeved-piece--missing');
+        }
+        item.append(text('span', 'jeved-context-count', tally(piece, counts)));
+        return item;
+    }
+
+    async function paint() {
+        if (contextMode(draft) !== CUSTOM_CONTEXT) {
+            return;
+        }
+        const pieces = contextChecklist();
+        const counts = await countPieces(pieces);
+        const ticked = new Set(contextKeys(draft));
+        const known = new Set(pieces.map(piece => piece.key));
+        const rows = [
+            ...pieces,
+            ...[...ticked].filter(key => !known.has(key)).map(key => ({ key, label: pieceLabel(key), missing: true })),
+        ];
+        list.replaceChildren(...rows.map(piece => pieceRow(piece, ticked.has(piece.key), counts)));
+    }
+
+    const show = () => {
+        picker.hidden = contextMode(draft) !== CUSTOM_CONTEXT;
+        detach(paint());
+    };
+    const control = segmented(CONTEXT_OPTIONS, contextMode(draft), value => {
+        draft.context = value;
+        show();
+        onChange();
+    });
+    control.id = 'jeved_sensor_context';
+    show();
+
+    return {
+        element: formRow('Context', column('jeved-context-block',
+            help('What Jev reads besides the messages.'), control, picker, actions(preview)), '', { wide: true }),
+    };
 }
 
 function levelRows(draft, redraw, onChange) {
@@ -336,6 +416,109 @@ function scaleBlock(draft, onChange) {
     return { element: block, draw };
 }
 
+function entryLine(className, caption, control) {
+    const line = row(text('span', `jeved-list-entry ${className}`, caption));
+    line.append(control);
+    return line;
+}
+
+function listCard(preset, list, entries, redraw) {
+    const saved = column('jeved-list-saved');
+    list.entries.forEach((entry, position) => {
+        saved.append(row(
+            field('text', entry, 'a house rule', value => {
+                list.entries[position] = value;
+                saveSettings();
+            }),
+            iconButton('fa-xmark', 'Remove this starting entry', () => {
+                list.entries.splice(position, 1);
+                normalisePreset(preset);
+                saveSettings();
+                redraw();
+            }),
+        ));
+    });
+    saved.append(actions(button('Add starting entry', 'Add an entry every chat starts with', () => {
+        list.entries.push('');
+        saveSettings();
+        redraw();
+    }, { icon: 'fa-plus' })));
+
+    const here = column('jeved-list-chat');
+    for (const entry of entries) {
+        here.append(entryLine('', entry, iconButton('fa-xmark', 'Take this entry out of this chat', () => {
+            manualChange(list.name, REMOVE, entry);
+            redraw();
+        })));
+    }
+    for (const entry of hiddenEntries(preset, list.name, entries)) {
+        here.append(entryLine('jeved-list-entry--gone', entry, button('Restore', 'Put this starting entry back in this chat', () => {
+            restoreEntry(preset, list.name, entry);
+            redraw();
+        })));
+    }
+    if (!entries.length) {
+        here.append(help('No entries in this chat yet.'));
+    }
+    let typed = '';
+    const box = field('text', '', 'a house rule', value => { typed = value; });
+    here.append(row(box, button('Add', 'Add this entry to this chat only', () => {
+        if (!normaliseEntry(typed)) {
+            return;
+        }
+        forgetManual(list.name, typed);
+        manualChange(list.name, ADD, typed);
+        redraw();
+    }, { icon: 'fa-plus' })));
+
+    return column(
+        'jeved-list-card',
+        row(
+            text('span', 'jeved-list-title', list.name),
+            iconButton('fa-trash-can', 'Delete this list', () => {
+                const at = preset.lists.indexOf(list);
+                if (at >= 0) {
+                    preset.lists.splice(at, 1);
+                    saveSettings();
+                    redraw();
+                }
+            }),
+        ),
+        formRow('Saved in the preset', saved),
+        formRow('In this chat', here),
+    );
+}
+
+export function listsBlock(getCurrent) {
+    const block = node('div', 'jeved-lists', { id: 'jeved_lists' });
+    let typed = '';
+
+    function draw() {
+        invalidateMeasured();
+        const preset = getCurrent();
+        const entriesOf = listResolver(preset);
+        const cards = presetLists(preset).map(list => listCard(preset, list, entriesOf(list.name), draw));
+        const name = field('text', '', 'rules', value => { typed = value; });
+        const add = button('Add list', 'Declare a list in this preset', () => {
+            const wanted = slugId(typed || 'list', presetLists(preset).map(list => list.name));
+            preset.lists = [...presetLists(preset), { name: wanted, entries: [] }];
+            typed = '';
+            normalisePreset(preset);
+            saveSettings();
+            draw();
+        }, { icon: 'fa-plus' });
+        block.replaceChildren(section(
+            'Lists',
+            ...cards,
+            row(name, add),
+            help('A list holds plain lines that this chat keeps. A sensor can repeat over one, and a rule can add to one or take from one.'),
+        ));
+    }
+
+    draw();
+    return { element: block, draw };
+}
+
 function sensorPane(preset, draft, api, host, { saved, otherIds }) {
     const questionHint = help(questionKeysHint(draft));
     questionHint.id = 'jeved_sensor_hint';
@@ -382,11 +565,27 @@ function sensorPane(preset, draft, api, host, { saved, otherIds }) {
         range: COUNT_RANGE, label: 'Assistant messages',
     });
     assistantSlider.id = 'jeved_sensor_assistant';
-    const contextToggle = toggle(draft.context, 'Send the card and the prompts with this sensor', value => {
-        draft.context = value;
+    const context = contextBlock(draft, touch);
+    const repeatHint = help('');
+    repeatHint.id = 'jeved_sensor_repeat_hint';
+    const repeatOptions = [
+        { value: '', label: 'No' },
+        ...presetLists(preset).map(list => ({ value: list.name, label: list.name })),
+    ];
+    const paintRepeat = () => {
+        const list = repeatOf(draft);
+        const entries = list ? listResolver(preset)(list) : [];
+        repeatHint.textContent = list && !entries.length
+            ? `0 entries, add one in Lists at the top of this tab.`
+            : 'Ask the same question once for each entry of a list. Use {{entry}} in the wording.';
+    };
+    const repeatPicker = picker(repeatOptions, repeatOf(draft), value => {
+        draft.repeat = value;
+        paintRepeat();
         touch();
     });
-    contextToggle.id = 'jeved_sensor_context';
+    repeatPicker.id = 'jeved_sensor_repeat';
+    paintRepeat();
 
     function drawAsk() {
         const type = typeOf(draft);
@@ -419,8 +618,9 @@ function sensorPane(preset, draft, api, host, { saved, otherIds }) {
             'jeved-field-grid',
             formRow('User messages', userSlider),
             formRow('Assistant messages', assistantSlider),
-            formRow('Context', contextToggle, 'The card and your prompts.'),
         ),
+        context.element,
+        formRow('Repeat over list', column('', repeatPicker, repeatHint)),
         runsLine,
         reads.element,
         askRow,
@@ -457,7 +657,9 @@ function sensorPane(preset, draft, api, host, { saved, otherIds }) {
 export function sensorsTab(host) {
     let preset = getPreset();
     let openNames = new Map();
+    settleContextPrompts(preset);
 
+    const lists = listsBlock(() => preset);
     const controller = masterDetail({
         newLabel: 'New sensor',
         caption: '',
@@ -541,9 +743,11 @@ export function sensorsTab(host) {
     });
 
     return {
-        element: controller.element,
+        element: column('jeved-sensors-tab', lists.element, controller.element),
         refresh() {
             preset = getPreset();
+            settleContextPrompts(preset);
+            lists.draw();
             controller.refresh();
         },
         leave: controller.leave,

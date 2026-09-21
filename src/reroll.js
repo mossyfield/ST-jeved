@@ -1,5 +1,6 @@
 import { REROLL } from './actions.js';
 import { MAX_WAIT_MS, POLL_MS } from './limits.js';
+import { makeReceipt } from './store.js';
 
 const NOT_STARTED = ['skipped', 'none'];
 
@@ -40,18 +41,10 @@ export async function runReroll(host) {
 
     const start = { chatId: host.getChatId(), hash: host.hash(), swipeId: host.swipeId() };
     const { rule, reason } = hits[0];
-    const entry = { rule: rule.id, action: REROLL, reason };
-    if (String(rule.directive ?? '').trim()) {
-        entry.text = rule.directive;
-    }
-    const scores = host.scores?.();
-    if (scores && Object.keys(scores).length) {
-        entry.scores = scores;
-    }
-    host.addFired(entry);
+    host.addFired(makeReceipt(hits[0], REROLL, { scores: host.scores?.() }));
     await host.save();
     host.report({ status: 'started', rule, reason });
-    await host.runScript(rule);
+    await host.runScript(hits[0]);
 
     const before = host.swipeCount();
     let waited = 0;

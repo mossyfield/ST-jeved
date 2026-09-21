@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { BUILT_IN, builtInPreset } from '../src/defaults.js';
-import { CONTEXT_KEYS } from '../src/context-groups.js';
 import { SCHEMA_VERSION } from '../src/limits.js';
-import { exportFileName, exportPreset, importPreset, isReservedKey, legacyReference, normaliseContextGroups, presetVersion, renameOption, slugId, uniqueName, upgradePreset, validatePreset } from '../src/presets.js';
+import { exportFileName, exportPreset, hasLegacyPrompts, importPreset, isReservedKey, legacyReference, presetVersion, renameOption, settleLegacyPrompts, slugId, uniqueName, upgradePreset, validatePreset } from '../src/presets.js';
 import { UNPARSABLE, stubParser } from './helpers/parser.js';
 
 const parse = stubParser();
+
+const ACTION_WORDS = "'nudge' or 'swipe' or 'list_add' or 'list_remove' or 'script'";
 
 const choiceSensor = (overrides = {}) => ({
     id: 'mood',
@@ -15,7 +16,8 @@ const choiceSensor = (overrides = {}) => ({
     type: 'choice',
     user: 1,
     assistant: 1,
-    context: false,
+    context: 'none',
+    contextPieces: [],
     question: 'Which mood fits `latest_turn`?',
     levels: [],
     options: [{ name: 'calm', description: 'Settled.' }, { name: 'angry', description: 'Furious.' }],
@@ -29,7 +31,8 @@ const noulSensor = (overrides = {}) => ({
     type: 'noul',
     user: 1,
     assistant: 1,
-    context: false,
+    context: 'none',
+    contextPieces: [],
     question: 'Is anyone in danger in `latest_turn`?',
     levels: ['Nobody is.', 'Someone is.'],
     options: [],
@@ -42,7 +45,8 @@ const sensor = (overrides = {}) => ({
     watch: false,
     user: 0,
     assistant: 5,
-    context: true,
+    context: 'all',
+    contextPieces: [],
     question: 'How well does `latest_turn` match `context`?',
     levels: ['a', 'b', 'c', 'd', 'e'],
     ...overrides,
@@ -67,7 +71,6 @@ const preset = (overrides = {}) => ({
     description: 'A preset.',
     sensors: [sensor()],
     rules: [rule()],
-    contextGroups: Object.fromEntries(CONTEXT_KEYS.map(key => [key, true])),
     ...overrides,
 });
 
@@ -91,7 +94,6 @@ const olderPreset = (overrides = {}) => ({
     description: 'A preset.',
     sensors: [olderSensor()],
     rules: [rule()],
-    contextGroups: Object.fromEntries(CONTEXT_KEYS.map(key => [key, true])),
     gap: 8,
     maxNudges: 1,
     ...overrides,
@@ -245,7 +247,7 @@ describe('validatePreset', () => {
         assert.ok(validatePreset(preset({ sensors: [sensor(), sensor()], rules: [] })).includes("sensor 'tone': two sensors have that id"));
         assert.ok(validatePreset(preset({ sensors: [sensor({ user: -1 })], rules: [] })).includes("sensor 'tone': user messages must be a whole number from 0 to 50"));
         assert.ok(validatePreset(preset({ sensors: [sensor({ assistant: 99 })], rules: [] })).includes("sensor 'tone': assistant messages must be a whole number from 0 to 50"));
-        assert.ok(validatePreset(preset({ rules: [rule({ action: 'shout' })] })).includes("rule 'flat': the action must be 'nudge' or 'swipe' or 'script'"));
+        assert.ok(validatePreset(preset({ rules: [rule({ action: 'shout' })] })).includes(`rule 'flat': the action must be ${ACTION_WORDS}`));
     });
 
     it('asks a sensor to read at least one message', () => {
@@ -292,6 +294,67 @@ describe('validatePreset', () => {
             .includes("the name '__proto__' is reserved and can't be used"));
     });
 
+    it('checks the name of every list it declares', () => {
+        const named = lists => validatePreset(preset({ lists, rules: [] }));
+        assert.deepEqual(named([{ name: 'House Rules', entries: [] }]), [
+            "list 1: the name 'House Rules' can only hold lowercase letters, numbers and underscores",
+        ]);
+        assert.deepEqual(named([{ name: 'rules', entries: [] }, { name: 'rules', entries: [] }]), [
+            "list 'rules': two lists have that name",
+        ]);
+        assert.deepEqual(named([{ name: '__proto__', entries: [] }]), [
+            "list 1: the name '__proto__' is reserved and can't be used",
+        ]);
+        assert.deepEqual(named([{ name: 'rules', entries: ['one'] }]), []);
+    });
+
+    it('refuses a lists container and entries that are not arrays of text', () => {
+        assert.deepEqual(validatePreset(preset({ lists: { rules: [] }, rules: [] })), ['the lists must be an array']);
+        assert.deepEqual(validatePreset(preset({ lists: [{ name: 'rules', entries: 'one' }], rules: [] })), [
+            'list 1: its entries must be an array',
+        ]);
+        assert.deepEqual(validatePreset(preset({ lists: [{ name: 'rules', entries: [{ text: 'one' }] }], rules: [] })), [
+            'list 1: every entry must be a text',
+        ]);
+        assert.deepEqual(validatePreset(preset({ lists: [{ name: 'rules' }], rules: [] })), []);
+    });
+
+    it('refuses a sensor that repeats over a list as the exception of a rule', () => {
+        const lists = [{ name: 'rules', entries: [] }];
+        const sensors = [sensor(), sensor({ id: 'house', repeat: 'rules' })];
+        const gated = skipWhen => preset({ lists, sensors, rules: [rule({ skipWhen })] });
+        assert.deepEqual(validatePreset(gated({ sensor: 'house', op: 'below', value: 1 })), [
+            "rule 'flat', exception: a sensor that repeats over a list can't be an exception",
+        ]);
+        assert.deepEqual(validatePreset(gated({ sensor: 'tone', op: 'below', value: 1 })), []);
+    });
+
+    it('asks a repeating sensor and a list action for a list that is declared', () => {
+        const lists = [{ name: 'rules', entries: [] }];
+        assert.deepEqual(validatePreset(preset({ sensors: [sensor({ repeat: 'gone' })], rules: [] })), [
+            "sensor 'tone': no list named 'gone'",
+        ]);
+        assert.deepEqual(validatePreset(preset({ lists, sensors: [sensor({ repeat: 'rules' })], rules: [] })), []);
+
+        const adding = extra => preset({ lists, rules: [rule({ action: 'list_add', directive: '', ...extra })] });
+        assert.deepEqual(validatePreset(adding({})), ["rule 'flat': it needs a list", "rule 'flat': it needs a value"]);
+        assert.deepEqual(validatePreset(adding({ list: 'gone', value: 'x' })), ["rule 'flat': no list named 'gone'"]);
+        assert.deepEqual(validatePreset(adding({ list: 'rules', value: '{{entry}}' })), []);
+    });
+
+    it('refuses a rule whose sensors repeat over two different lists', () => {
+        const lists = [{ name: 'rules', entries: [] }, { name: 'cast', entries: [] }];
+        const sensors = [sensor({ id: 'one', repeat: 'rules' }), sensor({ id: 'two', repeat: 'cast' })];
+        const conditions = [
+            { sensor: 'one', op: 'below', value: 1 },
+            { sensor: 'two', op: 'below', value: 1 },
+        ];
+        assert.deepEqual(validatePreset(preset({ lists, sensors, rules: [rule({ conditions })] })), [
+            "rule 'flat': its sensors repeat over two lists, cast and rules",
+        ]);
+        assert.deepEqual(validatePreset(preset({ lists, sensors, rules: [rule({ conditions: [conditions[0]] })] })), []);
+    });
+
     it('refuses a file that is not a preset', () => {
         assert.deepEqual(validatePreset(null), ['The file does not hold a preset.']);
         assert.deepEqual(validatePreset({ sensors: [] }), ['The preset needs a list of sensors and a list of rules.']);
@@ -330,12 +393,12 @@ describe('upgradePreset', () => {
 
     it('turns a reply sensor into one message of each kind with no context', () => {
         const upgraded = upgradePreset(legacyPreset({ sensors: [legacySensor({ scope: 'reply' })] }));
-        assert.deepEqual(inputOf(upgraded.sensors[0]), [1, 1, false]);
+        assert.deepEqual(inputOf(upgraded.sensors[0]), [1, 1, 'none']);
     });
 
     it('turns a story sensor into the old window of replies, with context and no messages', () => {
         const upgraded = upgradePreset(legacyPreset());
-        assert.deepEqual(inputOf(upgraded.sensors[0]), [0, 7, true]);
+        assert.deepEqual(inputOf(upgraded.sensors[0]), [0, 7, 'all']);
         assert.equal(upgraded.storyWindow, undefined);
         assert.equal(upgraded.storyEvery, undefined);
         assert.equal(upgraded.sensors[0].scope, undefined);
@@ -418,7 +481,7 @@ describe('upgradePreset', () => {
         assert.deepEqual(upgraded.sensors[0].options.map(option => option.name), ['calm']);
     });
 
-    it('leaves a preset that already states version 4 exactly as it is', () => {
+    it('leaves a preset that already states this version exactly as it is', () => {
         const stamped = { jeved: SCHEMA_VERSION, ...preset() };
         const before = structuredClone(stamped);
         assert.deepEqual(upgradePreset(stamped), before);
@@ -438,20 +501,7 @@ describe('upgradePreset', () => {
 
     it('gives a schema 2 sensor with no turns the defaults the old build supplied', () => {
         const upgraded = upgradePreset({ jeved: 2, sensors: [{ id: 'tone', label: 'Tone' }], rules: [] });
-        assert.deepEqual(inputOf(upgraded.sensors[0]), [1, 1, false]);
-    });
-
-    it('turns on a group that a preset of its schema left out of the map', () => {
-        for (const older of [{ jeved: 2, sensors: [], rules: [] }, legacyPreset()]) {
-            const upgraded = upgradePreset({ ...older, contextGroups: { persona: false } });
-            assert.equal(upgraded.contextGroups.persona, false);
-            assert.equal(upgraded.contextGroups.main_prompt, true);
-            assert.equal(upgraded.contextGroups.scenario, true);
-        }
-    });
-
-    it('leaves plain normalisation defaulting a group that is not in the map off', () => {
-        assert.equal(normaliseContextGroups({ contextGroups: { persona: false } }).contextGroups.main_prompt, false);
+        assert.deepEqual(inputOf(upgraded.sensors[0]), [1, 1, 'none']);
     });
 
     it('leaves a preset from a newer Jeved untouched', () => {
@@ -480,24 +530,82 @@ describe('presetVersion', () => {
     });
 });
 
-describe('normaliseContextGroups', () => {
-    it('ticks every context group and keeps the ones you turned off', () => {
-        assert.deepEqual(normaliseContextGroups(legacyPreset()).contextGroups, Object.fromEntries(CONTEXT_KEYS.map(key => [key, true])));
-        const kept = normaliseContextGroups(preset({ contextGroups: { persona: false, description: true, junk: true } }));
-        assert.equal(kept.contextGroups.persona, false);
-        assert.equal(kept.contextGroups.description, true);
-        assert.equal(kept.contextGroups.junk, undefined);
+describe('the per-sensor context a 0.3 preset becomes', () => {
+    const fourth = (contextGroups, ...sensors) => upgradePreset({
+        jeved: 4,
+        sensors: sensors.map(context => ({ ...sensor(), context })),
+        rules: [],
+        contextGroups,
     });
 
-    it('leaves a group this preset never saw turned off', () => {
-        const older = normaliseContextGroups({ contextGroups: { main_prompt: true } });
-        assert.equal(older.contextGroups.main_prompt, true);
-        assert.equal(older.contextGroups.persona, false);
-        assert.equal(older.contextGroups.description, false);
+    it('sends everything when every box was ticked, and nothing when the sensor was off', () => {
+        const upgraded = fourth(undefined, true, false);
+        assert.deepEqual(upgraded.sensors.map(item => item.context), ['all', 'none']);
+        assert.deepEqual(upgraded.sensors.map(item => item.contextPieces), [[], []]);
+        assert.equal(upgraded.contextGroups, undefined);
     });
 
-    it('does not throw on junk', () => {
-        assert.equal(normaliseContextGroups({ contextGroups: 'nope' }).contextGroups.persona, true);
+    it('sends the ticked pieces when a box was unticked', () => {
+        const upgraded = fourth({ persona: false, scenario: false }, true, false);
+        const [on, off] = upgraded.sensors;
+        assert.equal(on.context, 'custom');
+        assert.deepEqual(on.contextPieces, [
+            'main_prompt', 'other_prompts', 'description', 'personality', 'character_note', 'post_history',
+        ]);
+        assert.equal(off.context, 'none');
+        assert.deepEqual(off.contextPieces, []);
+    });
+
+    it('reads a box the file never stated as ticked, and junk as every box ticked', () => {
+        assert.equal(fourth({ main_prompt: true }, true).sensors[0].context, 'all');
+        assert.equal(fourth('nope', true).sensors[0].context, 'all');
+    });
+});
+
+describe('the lists a 0.3 preset gains', () => {
+    it('gives the preset an empty list set and every sensor no repeat', () => {
+        const upgraded = upgradePreset({ jeved: 4, sensors: [sensor()], rules: [], contextGroups: {} });
+        assert.deepEqual(upgraded.lists, []);
+        assert.equal(upgraded.sensors[0].repeat, '');
+    });
+
+    it('carries the lists of a current file through export and import', () => {
+        const lists = [{ name: 'rules', entries: [' Stay in scene ', 'stay IN scene', ''] }];
+        const data = exportPreset('Shared', preset({ lists, sensors: [sensor({ repeat: 'rules' })] }));
+        const { preset: imported, problems } = importPreset(data, []);
+        assert.deepEqual(problems, []);
+        assert.deepEqual(imported.lists, [{ name: 'rules', entries: ['Stay in scene'] }]);
+        assert.equal(imported.sensors[0].repeat, 'rules');
+    });
+});
+
+describe('the legacy other_prompts marker', () => {
+    const marked = () => ({
+        sensors: [
+            { id: 'a', context: 'custom', contextPieces: ['description', 'other_prompts'] },
+            { id: 'b', context: 'all', contextPieces: [] },
+        ],
+        rules: [],
+    });
+
+    it('says which presets still carry one', () => {
+        assert.equal(hasLegacyPrompts(marked()), true);
+        assert.equal(hasLegacyPrompts({ sensors: [{ id: 'a', contextPieces: ['description'] }] }), false);
+        assert.equal(hasLegacyPrompts(null), false);
+    });
+
+    it('swaps it for the prompts that are enabled right now', () => {
+        const preset = marked();
+        assert.equal(settleLegacyPrompts(preset, ['prompt:nsfw', 'prompt:style']), 1);
+        assert.deepEqual(preset.sensors[0].contextPieces, ['description', 'prompt:nsfw', 'prompt:style']);
+        assert.deepEqual(preset.sensors[1].contextPieces, []);
+        assert.equal(settleLegacyPrompts(preset, ['prompt:nsfw']), 0);
+    });
+
+    it('drops it when the host offers no prompt list', () => {
+        const preset = marked();
+        assert.equal(settleLegacyPrompts(preset, null), 1);
+        assert.deepEqual(preset.sensors[0].contextPieces, ['description']);
     });
 });
 
@@ -597,11 +705,11 @@ describe('export and import', () => {
         assert.deepEqual(result.problems, []);
         assert.deepEqual(
             [result.preset.sensors[0].user, result.preset.sensors[0].assistant, result.preset.sensors[0].context],
-            [1, 1, false],
+            [1, 1, 'none'],
         );
     });
 
-    it('refuses a version 4 file whose sensor states no message counts', () => {
+    it('refuses a current file whose sensor states no message counts', () => {
         const data = exportPreset('Shared', preset());
         delete data.sensors[0].user;
         const result = importPreset(data, []);
@@ -626,28 +734,30 @@ describe('export and import', () => {
         assert.deepEqual(result.problems, []);
         assert.deepEqual(
             [result.preset.sensors[0].user, result.preset.sensors[0].assistant, result.preset.sensors[0].context],
-            [0, 7, true],
+            [0, 7, 'all'],
         );
         assert.equal(result.preset.sensors[0].question, 'How well does `history` and `latest_turn` match the intent of `context`?');
         assert.equal(result.preset.storyWindow, undefined);
-        assert.equal(result.preset.contextGroups.persona, true);
+        assert.equal(result.preset.contextGroups, undefined);
     });
 
     it('brings a file with no version at all up to date', () => {
         const result = importPreset({ name: 'Ancient', ...legacyPreset() }, []);
         assert.deepEqual(result.problems, []);
         assert.equal(result.name, 'Ancient');
-        assert.equal(result.preset.sensors[0].context, true);
+        assert.equal(result.preset.sensors[0].context, 'all');
     });
 
-    it('keeps the three input fields through a version 4 round trip', () => {
-        const data = exportPreset('Shared', preset({ sensors: [sensor({ user: 2, assistant: 3, context: true })] }));
+    it('keeps the four input fields through a round trip', () => {
+        const picked = sensor({ user: 2, assistant: 3, context: 'custom', contextPieces: ['description', 'prompt:style'] });
+        const data = exportPreset('Shared', preset({ sensors: [picked] }));
         const { preset: imported, problems } = importPreset(data, []);
         assert.deepEqual(problems, []);
         assert.deepEqual(
             [imported.sensors[0].user, imported.sensors[0].assistant, imported.sensors[0].context],
-            [2, 3, true],
+            [2, 3, 'custom'],
         );
+        assert.deepEqual(imported.sensors[0].contextPieces, ['description', 'prompt:style']);
         assert.equal(imported.gap, undefined);
         assert.equal(imported.maxNudges, undefined);
     });
@@ -694,7 +804,7 @@ describe('export and import', () => {
     it('refuses an action this Jeved does not know instead of quietly nudging', () => {
         const result = importPreset(exportPreset('Odd', preset({ rules: [rule({ action: 'teleport' })] })), []);
         assert.equal(result.preset, undefined);
-        assert.deepEqual(result.problems, ["rule 'flat': the action must be 'nudge' or 'swipe' or 'script'"]);
+        assert.deepEqual(result.problems, [`rule 'flat': the action must be ${ACTION_WORDS}`]);
     });
 
     it('refuses a file that is not a preset at all', () => {

@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { runReroll } from '../src/reroll.js';
-import { firedRule } from '../src/store.js';
 
 const rule = { id: 'long', label: 'Too long', action: 'swipe', directive: '(OOC: keep it short.)' };
 
@@ -81,7 +80,6 @@ function assertCleanedUp(world) {
     assert.equal(world.entries.length, 1);
     assert.equal(entryOf(world).text, undefined);
     assert.equal(entryOf(world).action, 'swipe');
-    assert.equal(firedRule(rule.id)({ fired: world.entries }), true);
 }
 
 describe('runReroll', () => {

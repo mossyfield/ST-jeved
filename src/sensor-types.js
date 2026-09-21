@@ -249,11 +249,32 @@ export function rangeOf(sensor) {
     return typeOf(sensor).range(sensor);
 }
 
+export function repeatOf(sensor) {
+    return String(sensor?.repeat ?? '').trim();
+}
+
+export function isRepeating(sensor) {
+    return !!repeatOf(sensor);
+}
+
 export function hasValue(sensor, value) {
+    if (repeatOf(sensor)) {
+        return isRecord(value) && Object.values(value).some(one => typeOf(sensor).valid(sensor, one));
+    }
     if (sensor) {
         return typeOf(sensor).valid(sensor, value);
     }
     return numberOf(value) !== null || (typeof value === 'string' && !!value);
+}
+
+export function entryValue(sensor, stored, key) {
+    const found = isRecord(stored) ? stored[key] : undefined;
+    return typeOf(sensor).valid(sensor, found) ? found : null;
+}
+
+export function entryText(sensor, stored, key) {
+    const found = entryValue(sensor, stored, key);
+    return found === null ? '' : typeOf(sensor).macro(sensor, found);
 }
 
 export function confidenceLevel(value) {
@@ -321,6 +342,7 @@ export function conditionTail(condition, sensors) {
 
 export function normaliseSensor(sensor) {
     sensor.type = isKnownType(sensor.type) ? String(sensor.type) : DEFAULT_TYPE;
+    sensor.repeat = repeatOf(sensor);
     sensor.levels = (Array.isArray(sensor.levels) ? sensor.levels : blankLevels())
         .slice(0, LEVELS.max)
         .map(level => String(level ?? ''));

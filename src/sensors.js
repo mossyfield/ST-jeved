@@ -1,6 +1,8 @@
-import { ruleAction } from './actions.js';
+import { AFTER_REPLY, BEFORE_GENERATION, ruleAction } from './actions.js';
+import { contextKey, contextKeys, contextMode, sendsContext } from './context-groups.js';
 import { MESSAGES } from './limits.js';
-import { findSensor, hasValue, typeOf } from './sensor-types.js';
+import { entryKey, fillEntries } from './lists.js';
+import { entryValue, findSensor, hasValue, repeatOf, typeOf } from './sensor-types.js';
 import { MESSAGE_MOMENT, REPLY_MOMENT, isNarrator, narratorIndices, userIndices } from './store.js';
 import { clamp } from './util.js';
 
@@ -71,6 +73,18 @@ export function momentOfRule(rule, sensors = []) {
         : REPLY_MOMENT;
 }
 
+export function phaseOfRule(rule, sensors = []) {
+    const fixed = ruleAction(rule)?.phase;
+    if (fixed) {
+        return fixed;
+    }
+    return momentOfRule(rule, sensors) === MESSAGE_MOMENT ? BEFORE_GENERATION : AFTER_REPLY;
+}
+
+export function firesInPhase(rule, phase, sensors = []) {
+    return phaseOfRule(rule, sensors) === phase;
+}
+
 export function missesReplySensor(rule, sensors = []) {
     return !!ruleAction(rule)?.needsReplySensor && momentOfRule(rule, sensors) === MESSAGE_MOMENT;
 }
@@ -88,7 +102,7 @@ export function labelsFor(sensor) {
     if (user > 1 || assistant > 1) {
         labels.push('history');
     }
-    if (sensor?.context) {
+    if (sendsContext(sensor)) {
         labels.push('context');
     }
     return labels;
@@ -121,7 +135,7 @@ function usable(sensor) {
 }
 
 export function groupKeyOf(sensor) {
-    return `${userCount(sensor)}:${assistantCount(sensor)}:${sensor?.context ? 1 : 0}`;
+    return `${userCount(sensor)}:${assistantCount(sensor)}:${contextKey(sensor)}`;
 }
 
 export function measuredSensors(preset, only = null) {
@@ -131,18 +145,34 @@ export function measuredSensors(preset, only = null) {
         && (!only || only.has(sensor.id)));
 }
 
-export function missingIds(sensors, scores) {
-    return (sensors ?? []).filter(sensor => !hasValue(sensor, scores?.[sensor.id])).map(sensor => sensor.id);
+export function missingIds(sensors, scores, entriesOf = null) {
+    return (sensors ?? []).filter(sensor => {
+        const list = repeatOf(sensor);
+        if (!list) {
+            return !hasValue(sensor, scores?.[sensor.id]);
+        }
+        const entries = entriesOf ? entriesOf(list) : [];
+        return entries.some(entry => entryValue(sensor, scores?.[sensor.id], entryKey(entry)) === null);
+    }).map(sensor => sensor.id);
 }
 
 export function sensorSignature(preset) {
     return measuredSensors(preset).map(sensor => `${sensor.id}:${groupKeyOf(sensor)}`).join('|');
 }
 
-export function groupSensors(preset, { moment = null, only = null } = {}) {
+export function entriesOfSensor(sensor) {
+    return Array.isArray(sensor?.entries) ? sensor.entries : null;
+}
+
+export function groupSensors(preset, { moment = null, only = null, entriesOf = null } = {}) {
     const groups = new Map();
     for (const sensor of measuredSensors(preset, only)) {
         if (moment && momentOf(sensor) !== moment) {
+            continue;
+        }
+        const list = repeatOf(sensor);
+        const entries = list ? (entriesOf?.(list) ?? []) : null;
+        if (entries && !entries.length) {
             continue;
         }
         const key = groupKeyOf(sensor);
@@ -151,26 +181,32 @@ export function groupSensors(preset, { moment = null, only = null } = {}) {
                 key,
                 user: userCount(sensor),
                 assistant: assistantCount(sensor),
-                context: !!sensor.context,
+                context: contextMode(sensor),
+                contextPieces: contextKeys(sensor),
                 ids: [],
                 sensors: [],
             });
         }
         const group = groups.get(key);
         group.ids.push(sensor.id);
-        group.sensors.push(sensor);
+        group.sensors.push(entries ? { ...sensor, entries } : sensor);
     }
     return [...groups.values()];
 }
 
 function sensorSpec(sensor) {
-    return {
+    const spec = {
         id: sensor.id,
         type: typeOf(sensor).id,
         question: String(sensor.question ?? ''),
         levels: (sensor.levels ?? []).map(level => String(level ?? '')),
         options: (sensor.options ?? []).map(option => ({ ...option })),
     };
+    const entries = entriesOfSensor(sensor);
+    if (entries) {
+        spec.entries = [...entries];
+    }
+    return spec;
 }
 
 export function groupSpec(group) {
@@ -180,33 +216,77 @@ export function groupSpec(group) {
         key: group.key,
         user: group.user,
         assistant: group.assistant,
-        context: group.context,
+        context: contextMode(group),
+        contextPieces: contextKeys(group),
         ids,
         sensors: (group.sensors ?? []).filter(sensor => wanted.has(sensor.id)).map(sensorSpec),
     };
 }
 
+export function askedIdsOf(group) {
+    const held = new Map((group?.sensors ?? []).map(sensor => [sensor.id, entriesOfSensor(sensor)]));
+    return [...(group?.ids ?? [])].map(id => {
+        const entries = held.get(id);
+        return entries ? `${id}[${entries.map(entry => entryKey(entry)).join('|')}]` : id;
+    });
+}
+
 export function requestKey(groups) {
     return (groups ?? [])
-        .map(group => `${group.key}=${[...group.ids].sort().join(',')}`)
+        .map(group => `${group.key}=${askedIdsOf(group).sort().join(',')}`)
         .sort()
         .join('|');
 }
 
+function questionOf(sensor, substitute, entry) {
+    const fill = text => substitute(fillEntries(text, entry ? [entry] : []));
+    return {
+        type: typeOf(sensor).id,
+        question: fill(sensor.question),
+        levels: (sensor.levels ?? []).map(level => fill(level)),
+        options: (sensor.options ?? []).map(option => ({
+            name: String(option?.name ?? ''),
+            description: fill(option?.description),
+        })),
+    };
+}
+
 function buildQuestions(sensors, substitute) {
     const questions = Object.create(null);
+    const plan = [];
     for (const sensor of sensors) {
-        questions[sensor.id] = {
-            type: typeOf(sensor).id,
-            question: substitute(sensor.question),
-            levels: (sensor.levels ?? []).map(level => substitute(level)),
-            options: (sensor.options ?? []).map(option => ({
-                name: String(option?.name ?? ''),
-                description: substitute(option?.description),
-            })),
-        };
+        const entries = entriesOfSensor(sensor);
+        if (!entries) {
+            questions[sensor.id] = questionOf(sensor, substitute, '');
+            plan.push({ wire: sensor.id, id: sensor.id, entry: '' });
+            continue;
+        }
+        entries.forEach((entry, position) => {
+            const wire = `${sensor.id}#${position}`;
+            questions[wire] = questionOf(sensor, substitute, entry);
+            plan.push({ wire, id: sensor.id, entry });
+        });
     }
-    return questions;
+    return { questions, plan };
+}
+
+export function foldAnswers(result, plan) {
+    const folded = { scores: Object.create(null), confidence: Object.create(null), probabilities: Object.create(null) };
+    for (const step of plan ?? []) {
+        for (const field of ['scores', 'confidence', 'probabilities']) {
+            const found = result?.[field]?.[step.wire];
+            if (found === undefined) {
+                continue;
+            }
+            if (!step.entry) {
+                folded[field][step.id] = found;
+            } else {
+                folded[field][step.id] ??= {};
+                folded[field][step.id][entryKey(step.entry)] = found;
+            }
+        }
+    }
+    return folded;
 }
 
 function textAt(chat, index) {
@@ -235,8 +315,8 @@ function buildState(chat, index, group) {
 
 export function buildRequest(chat, index, group, context, substitute) {
     const state = buildState(chat, index, group);
-    if (group.context && context) {
+    if (context && sendsContext(group)) {
         state.context = context;
     }
-    return { state, questions: buildQuestions(group.sensors ?? [], substitute) };
+    return { state, ...buildQuestions(group.sensors ?? [], substitute) };
 }

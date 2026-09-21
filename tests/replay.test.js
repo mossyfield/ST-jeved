@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { AFTER_REPLY, ruleAction } from '../src/actions.js';
+import { AFTER_REPLY, BEFORE_GENERATION } from '../src/actions.js';
 import { evaluate, replayRule, sinceFire } from '../src/rules.js';
-import { addFired, firedRule, getHistory, repliesSince, writeDecision, writeScores } from '../src/store.js';
+import { phaseOfRule } from '../src/sensors.js';
+import { addFired, getHistory, sinceRuleIn, writeDecision, writeScores } from '../src/store.js';
+import { hashText } from '../src/util.js';
 
 const ids = ['change', 'tension', 'scene'];
 const sensors = [
@@ -32,9 +34,8 @@ function live(subject, turns, { moment = 'reply', members = 1 } = {}) {
     const chat = [];
     const fired = [];
     const action = subject.action ?? 'nudge';
-    const late = ruleAction(subject)?.phase === AFTER_REPLY;
-    const cooldown = subject.cooldown || Infinity;
-    const sinceRule = () => repliesSince(chat, firedRule(subject.id), cooldown);
+    const late = phaseOfRule(subject, sensors) === AFTER_REPLY;
+    const sinceRule = id => sinceRuleIn(chat)(id);
     let lastReply = -1;
 
     const hitsNow = () => evaluate({
@@ -63,7 +64,7 @@ function live(subject, turns, { moment = 'reply', members = 1 } = {}) {
             chat.push(reply);
             lastReply = chat.length - 1;
             if (late && hitsNow().length) {
-                addFired(chat[userIndex], { rule: subject.id, action, reason: '', text: 'x' });
+                addFired(chat[userIndex], { rule: subject.id, action, reason: '', reply: hashText(reply.mes) });
                 fired.push(lastReply);
             }
         }
@@ -91,19 +92,19 @@ function replayed(subject, chat, moment = 'reply') {
 const calm = count => Array.from({ length: count }, () => ({ reply: { change: 1, tension: 1 } }));
 
 describe('sinceFire', () => {
-    it('counts a nudge from the reply it was decided on', () => {
-        assert.equal(sinceFire('nudge', 5, 3), 2);
-        assert.equal(sinceFire('nudge', 3, 3), 0);
+    it('counts a before-reply rule from the reply it was decided on', () => {
+        assert.equal(sinceFire(BEFORE_GENERATION, 5, 3), 2);
+        assert.equal(sinceFire(BEFORE_GENERATION, 3, 3), 0);
     });
 
-    it('counts a swipe one higher, because the reply it fired on is already past', () => {
-        assert.equal(sinceFire('swipe', 5, 3), 3);
-        assert.equal(sinceFire('swipe', 3, 3), 1);
+    it('counts an after-reply rule one higher, because the reply it fired on is already past', () => {
+        assert.equal(sinceFire(AFTER_REPLY, 5, 3), 3);
+        assert.equal(sinceFire(AFTER_REPLY, 3, 3), 1);
     });
 
     it('is infinite when the rule has never fired', () => {
-        assert.equal(sinceFire('nudge', 4, null), Infinity);
-        assert.equal(sinceFire('swipe', 4, undefined), Infinity);
+        assert.equal(sinceFire(BEFORE_GENERATION, 4, null), Infinity);
+        assert.equal(sinceFire(AFTER_REPLY, 4, undefined), Infinity);
     });
 });
 
@@ -154,6 +155,14 @@ describe('replay agrees with a live run at the reply moment', () => {
         const subject = rule({ action: 'script', directive: '', script: '/echo hi', cooldown: 2 });
         const { chat, fired } = live(subject, calm(8));
         assert.ok(fired.length > 1);
+        assert.deepEqual(replayed(subject, chat), fired);
+    });
+
+    it('agrees for a script rule in a group chat, where its cooldown starts at one of two replies', () => {
+        const subject = rule({ action: 'script', directive: '', script: '/echo hi', cooldown: 3 });
+        const turns = Array.from({ length: 4 }, () => ({ replies: [{ change: 1 }, { change: 1 }] }));
+        const { chat, fired } = live(subject, turns, { members: 2 });
+        assert.ok(fired.length > 1 && fired.length < 8);
         assert.deepEqual(replayed(subject, chat), fired);
     });
 

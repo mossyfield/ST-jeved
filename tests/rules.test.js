@@ -199,6 +199,77 @@ describe('evaluate', () => {
     });
 });
 
+describe('a rule on a repeating sensor', () => {
+    const house = { id: 'house', label: 'House', type: 'noul', repeat: 'rules', user: 1, assistant: 1 };
+    const over = list => () => list;
+    const held = entries => ({ index: next++, scores: { house: entries } });
+    const sure = (entries, levels) => ({ index: next++, scores: { house: entries }, confidence: { house: levels } });
+    const repeating = (overrides = {}) => rule({
+        conditions: [{ sensor: 'house', op: 'above', value: 0.5 }],
+        need: 1,
+        window: 1,
+        ...overrides,
+    });
+    const fire = (history, subject, entries) => evaluate({
+        history,
+        rules: [subject],
+        sensorIds: ['house'],
+        sensors: [house],
+        listEntries: over(entries),
+    });
+
+    it('fires once for the whole turn and names the entries that matched, in list order', () => {
+        const hits = fire([held({ one: 0.9, two: 0.1, three: 0.8 })], repeating(), ['One', 'Two', 'Three']);
+        assert.equal(hits.length, 1);
+        assert.deepEqual(hits[0].entries, ['One', 'Three']);
+        assert.match(hits[0].reason, /for One; Three$/);
+    });
+
+    it('counts the window of each entry on its own', () => {
+        const history = [held({ one: 0.9, two: 0.9 }), held({ one: 0.9, two: 0.1 })];
+        const hits = fire(history, repeating({ need: 2, window: 2 }), ['one', 'two']);
+        assert.deepEqual(hits[0].entries, ['one']);
+    });
+
+    it('reads the confidence of each entry on its own', () => {
+        const history = [sure({ one: 0.9, two: 0.9 }, { one: 0.9, two: 0.2 })];
+        const subject = repeating({ conditions: [{ sensor: 'house', op: 'above', value: 0.5, minConfidence: 0.7 }] });
+        assert.deepEqual(fire(history, subject, ['one', 'two'])[0].entries, ['one']);
+    });
+
+    it('never fires while the list is empty, and says so', () => {
+        assert.deepEqual(fire([held({ one: 0.9 })], repeating(), []), []);
+        const status = explain(repeating(), {
+            history: [held({ one: 0.9 })],
+            sensorIds: ['house'],
+            sensors: [house],
+            listEntries: over([]),
+        });
+        assert.equal(status.text, 'List is empty');
+        assert.match(status.detail, /The list rules has no entries/);
+    });
+
+    it('counts the best entry in the rule status and in matchingCount', () => {
+        const history = [held({ one: 0.9, two: 0.1 }), held({ one: 0.1, two: 0.1 })];
+        const known = { sensors: [house], listEntries: over(['one', 'two']) };
+        const short = repeating({ need: 2, window: 2 });
+        assert.equal(matchingCount(history, short, known), 1);
+        assert.equal(explain(short, { history, sensorIds: ['house'], ...known }).text, '1 of 2');
+    });
+
+    it('replays each turn it would have fired on', () => {
+        const history = [held({ one: 0.9 }), held({ one: 0.1 }), held({ one: 0.9 })];
+        const turns = replayRule({
+            history,
+            rule: repeating(),
+            sensorIds: ['house'],
+            sensors: [house],
+            listEntries: over(['one']),
+        });
+        assert.deepEqual(turns.map(turn => turn.index), [history[0].index, history[2].index]);
+    });
+});
+
 describe('conditionHolds', () => {
     const entry = (scores, confidence = {}) => ({ index: 0, scores, confidence });
 

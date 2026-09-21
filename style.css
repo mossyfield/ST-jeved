@@ -426,18 +426,34 @@
     overflow-wrap: anywhere;
 }
 
-.jeved-context {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-    gap: 2px 18px;
-    margin-bottom: 8px;
+.jeved-context-block {
+    margin-bottom: 10px;
+    gap: 6px;
 }
 
-.jeved-context .jeved-check-label {
+.jeved-pieces {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.jeved-piece {
     display: flex;
     align-items: center;
     width: 100%;
     min-width: 0;
+}
+
+.jeved-piece > span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.jeved-piece--missing {
+    opacity: 0.45;
 }
 
 .jeved-context-count {
@@ -451,6 +467,36 @@
 .jeved-cut {
     color: var(--warning);
     opacity: 1;
+}
+
+.jeved-list-card {
+    gap: 6px;
+    padding: 8px;
+    margin-bottom: 8px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+}
+
+.jeved-list-title {
+    flex: 1;
+    font-weight: 600;
+}
+
+.jeved-list-saved,
+.jeved-list-chat {
+    gap: 4px;
+    width: 100%;
+}
+
+.jeved-list-entry {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.jeved-list-entry--gone {
+    text-decoration: line-through;
+    opacity: 0.55;
 }
 
 .jeved-context-key {
