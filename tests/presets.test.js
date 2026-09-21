@@ -570,12 +570,20 @@ describe('the lists a 0.3 preset gains', () => {
     });
 
     it('carries the lists of a current file through export and import', () => {
-        const lists = [{ name: 'rules', entries: [' Stay in scene ', 'stay IN scene', ''] }];
+        const lists = [{ name: 'rules', description: 'One rule per entry.', entries: [' Stay in scene ', 'stay IN scene', ''] }];
         const data = exportPreset('Shared', preset({ lists, sensors: [sensor({ repeat: 'rules' })] }));
         const { preset: imported, problems } = importPreset(data, []);
         assert.deepEqual(problems, []);
-        assert.deepEqual(imported.lists, [{ name: 'rules', entries: ['Stay in scene'] }]);
+        assert.deepEqual(imported.lists, [{ name: 'rules', description: 'One rule per entry.', entries: ['Stay in scene'] }]);
         assert.equal(imported.sensors[0].repeat, 'rules');
+    });
+
+    it('gives a list with no description an empty one, and refuses one that is not text', () => {
+        const data = exportPreset('Shared', preset({ lists: [{ name: 'rules', entries: [] }] }));
+        assert.equal(importPreset(data, []).preset.lists[0].description, '');
+        assert.deepEqual(validatePreset(preset({ lists: [{ name: 'rules', description: 7 }], rules: [] })), [
+            'list 1: the description must be a text',
+        ]);
     });
 });
 

@@ -1,16 +1,20 @@
 import { JEVED_UPDATED } from '../engine.js';
 import { activityTab } from './activity-tab.js';
 import { detach, node } from './dom.js';
+import { listsTab } from './lists-tab.js';
 import { rulesTab } from './rules-tab.js';
 import { settingsTab } from './settings-tab.js';
 import { sensorsTab } from './sensors-tab.js';
 
-const TABS = [
+export const TABS = [
     { name: 'rules', label: 'Rules', make: rulesTab },
     { name: 'sensors', label: 'Sensors', make: sensorsTab },
+    { name: 'lists', label: 'Lists', make: listsTab },
     { name: 'activity', label: 'Activity', make: activityTab },
     { name: 'settings', label: 'Settings', make: settingsTab },
 ];
+
+export const tabNames = () => TABS.map(tab => tab.name);
 
 let live = null;
 
@@ -49,6 +53,12 @@ export async function openWorkspace(startTab = 'rules') {
                 await current.startNew(sensorId);
             }
         },
+        openList: async name => {
+            if (await go('lists')) {
+                await current.select(name);
+            }
+        },
+        openTab: go,
     };
 
     async function go(next) {

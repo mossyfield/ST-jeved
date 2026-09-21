@@ -3,10 +3,10 @@ import {
 } from '../context-groups.js';
 import { blankSensor } from '../defaults.js';
 import { excerpt, listPhrase, momentLine, momentTag, questionKeysHint, rescanSentence, sensorProblem, tokenWords } from '../describe.js';
-import { describeError, invalidateMeasured, measureBlockReason, planMeasurement, rescan, settleContextPrompts, testEntries, testIndices, testSensor } from '../engine.js';
+import { describeError, measureBlockReason, planMeasurement, rescan, settleContextPrompts, testEntries, testIndices, testSensor } from '../engine.js';
 import { buildContext, contextChecklist, countPieces, countTokens } from '../instructions.js';
 import { LEVELS, MESSAGES, OPTIONS } from '../limits.js';
-import { ADD, REMOVE, forgetManual, hiddenEntries, listResolver, manualChange, normaliseEntry, presetLists, restoreEntry } from '../lists.js';
+import { presetLists } from '../lists.js';
 import { legacyReference, renameOption, slugId, validatePreset } from '../presets.js';
 import { CHOICE, NOUL, SENSOR_TYPES, repeatOf, sensorLabel, typeOf, valueText } from '../sensor-types.js';
 import { buildRequest, groupKeyOf, groupSensors, missesReplySensor, momentCount, momentOf, momentWord } from '../sensors.js';
@@ -16,6 +16,7 @@ import { toast } from '../toast.js';
 import { isRecord } from '../util.js';
 import { actions, area, busy, button, checkbox, column, detach, field, fold, formRow, help, iconButton, node, note, picker, resultsBox, row, section, segmented, setLabel, slider, text, toggle, toolbar, withReason } from './dom.js';
 import { ask, contextPopup } from './dialogs.js';
+import { entriesBlock } from './entries.js';
 import { masterDetail } from './master.js';
 
 const TEST_REPLIES = 10;
@@ -319,7 +320,7 @@ function contextBlock(draft, onChange) {
 
     return {
         element: formRow('Context', column('jeved-context-block',
-            help('What Jev reads besides the messages.'), control, picker, actions(preview)), '', { wide: true }),
+            help('What Jev reads besides the messages.'), row(control, preview), picker), '', { wide: true }),
     };
 }
 
@@ -416,106 +417,37 @@ function scaleBlock(draft, onChange) {
     return { element: block, draw };
 }
 
-function entryLine(className, caption, control) {
-    const line = row(text('span', `jeved-list-entry ${className}`, caption));
-    line.append(control);
-    return line;
-}
+const REPEAT_HINT = 'Asks the question once for each entry. Write {{entry}} in the question.';
+const OPEN_ENTRIES = 8;
 
-function listCard(preset, list, entries, redraw) {
-    const saved = column('jeved-list-saved');
-    list.entries.forEach((entry, position) => {
-        saved.append(row(
-            field('text', entry, 'a house rule', value => {
-                list.entries[position] = value;
-                saveSettings();
-            }),
-            iconButton('fa-xmark', 'Remove this starting entry', () => {
-                list.entries.splice(position, 1);
-                normalisePreset(preset);
-                saveSettings();
-                redraw();
-            }),
-        ));
-    });
-    saved.append(actions(button('Add starting entry', 'Add an entry every chat starts with', () => {
-        list.entries.push('');
-        saveSettings();
-        redraw();
-    }, { icon: 'fa-plus' })));
-
-    const here = column('jeved-list-chat');
-    for (const entry of entries) {
-        here.append(entryLine('', entry, iconButton('fa-xmark', 'Take this entry out of this chat', () => {
-            manualChange(list.name, REMOVE, entry);
-            redraw();
-        })));
-    }
-    for (const entry of hiddenEntries(preset, list.name, entries)) {
-        here.append(entryLine('jeved-list-entry--gone', entry, button('Restore', 'Put this starting entry back in this chat', () => {
-            restoreEntry(preset, list.name, entry);
-            redraw();
-        })));
-    }
-    if (!entries.length) {
-        here.append(help('No entries in this chat yet.'));
-    }
-    let typed = '';
-    const box = field('text', '', 'a house rule', value => { typed = value; });
-    here.append(row(box, button('Add', 'Add this entry to this chat only', () => {
-        if (!normaliseEntry(typed)) {
-            return;
-        }
-        forgetManual(list.name, typed);
-        manualChange(list.name, ADD, typed);
-        redraw();
-    }, { icon: 'fa-plus' })));
-
-    return column(
-        'jeved-list-card',
-        row(
-            text('span', 'jeved-list-title', list.name),
-            iconButton('fa-trash-can', 'Delete this list', () => {
-                const at = preset.lists.indexOf(list);
-                if (at >= 0) {
-                    preset.lists.splice(at, 1);
-                    saveSettings();
-                    redraw();
-                }
-            }),
-        ),
-        formRow('Saved in the preset', saved),
-        formRow('In this chat', here),
-    );
-}
-
-export function listsBlock(getCurrent) {
-    const block = node('div', 'jeved-lists', { id: 'jeved_lists' });
-    let typed = '';
+function repeatBlock(preset, draft, host, onChange) {
+    const block = node('div', 'jeved-repeat-block');
+    const entries = entriesBlock(preset, () => repeatOf(draft), onChange);
+    const held = fold('', entries.element);
+    held.id = 'jeved_sensor_entries';
+    const caption = held.querySelector('.jeved-fold-head');
+    const jump = button('Open in Lists', 'Open this list on the Lists tab', () => host.openList(repeatOf(draft)));
+    const bar = actions(jump);
+    block.append(held, bar);
+    let shown = null;
 
     function draw() {
-        invalidateMeasured();
-        const preset = getCurrent();
-        const entriesOf = listResolver(preset);
-        const cards = presetLists(preset).map(list => listCard(preset, list, entriesOf(list.name), draw));
-        const name = field('text', '', 'rules', value => { typed = value; });
-        const add = button('Add list', 'Declare a list in this preset', () => {
-            const wanted = slugId(typed || 'list', presetLists(preset).map(list => list.name));
-            preset.lists = [...presetLists(preset), { name: wanted, entries: [] }];
-            typed = '';
-            normalisePreset(preset);
-            saveSettings();
-            draw();
-        }, { icon: 'fa-plus' });
-        block.replaceChildren(section(
-            'Lists',
-            ...cards,
-            row(name, add),
-            help('A list holds plain lines that this chat keeps. A sensor can repeat over one, and a rule can add to one or take from one.'),
-        ));
+        const list = repeatOf(draft);
+        held.hidden = !list;
+        bar.hidden = !list;
+        if (!list) {
+            shown = null;
+            return;
+        }
+        const count = entries.draw();
+        caption.textContent = `In this chat: ${count}`;
+        jump.title = `Open the list ${list} on the Lists tab`;
+        if (shown !== list) {
+            shown = list;
+            held.open = count <= OPEN_ENTRIES;
+        }
     }
 
-    draw();
     return { element: block, draw };
 }
 
@@ -566,26 +498,22 @@ function sensorPane(preset, draft, api, host, { saved, otherIds }) {
     });
     assistantSlider.id = 'jeved_sensor_assistant';
     const context = contextBlock(draft, touch);
-    const repeatHint = help('');
-    repeatHint.id = 'jeved_sensor_repeat_hint';
     const repeatOptions = [
         { value: '', label: 'No' },
         ...presetLists(preset).map(list => ({ value: list.name, label: list.name })),
     ];
-    const paintRepeat = () => {
-        const list = repeatOf(draft);
-        const entries = list ? listResolver(preset)(list) : [];
-        repeatHint.textContent = list && !entries.length
-            ? `0 entries, add one in Lists at the top of this tab.`
-            : 'Ask the same question once for each entry of a list. Use {{entry}} in the wording.';
-    };
+    const repeat = repeatBlock(preset, draft, host, () => {
+        test.paint();
+        repeat.draw();
+    });
     const repeatPicker = picker(repeatOptions, repeatOf(draft), value => {
         draft.repeat = value;
-        paintRepeat();
+        repeat.draw();
         touch();
     });
     repeatPicker.id = 'jeved_sensor_repeat';
-    paintRepeat();
+    repeat.draw();
+    api.onRefresh(() => repeat.draw());
 
     function drawAsk() {
         const type = typeOf(draft);
@@ -620,7 +548,7 @@ function sensorPane(preset, draft, api, host, { saved, otherIds }) {
             formRow('Assistant messages', assistantSlider),
         ),
         context.element,
-        formRow('Repeat over list', column('', repeatPicker, repeatHint)),
+        formRow('Repeat over list', column('', repeatPicker, help(REPEAT_HINT), repeat.element), '', { wide: true }),
         runsLine,
         reads.element,
         askRow,
@@ -659,7 +587,6 @@ export function sensorsTab(host) {
     let openNames = new Map();
     settleContextPrompts(preset);
 
-    const lists = listsBlock(() => preset);
     const controller = masterDetail({
         newLabel: 'New sensor',
         caption: '',
@@ -743,11 +670,10 @@ export function sensorsTab(host) {
     });
 
     return {
-        element: column('jeved-sensors-tab', lists.element, controller.element),
+        element: controller.element,
         refresh() {
             preset = getPreset();
             settleContextPrompts(preset);
-            lists.draw();
             controller.refresh();
         },
         leave: controller.leave,

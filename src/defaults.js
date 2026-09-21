@@ -212,7 +212,7 @@ const builtInSensors = [
         assistant: 1,
         context: NO_CONTEXT,
         contextPieces: [],
-        repeat: 'rules',
+        repeat: 'house_rules',
         question: '`latest_turn` follows this rule: {{entry}}',
         levels: [],
     },
@@ -452,7 +452,11 @@ export const builtInPresets = {
     [BUILT_IN]: {
         jeved: SCHEMA_VERSION,
         description: 'Puppet rerolls a reply that writes your character. House rule rerolls a reply that breaks one of the house rules you keep in the "rules" list, and makes no call while that list is empty. Attention, Echo, Drift and Gentle add one line to your next message when they fire. The four Scene rules read your message before the reply and steer that same reply. Four rules are off: Flat, Lore, Picture and Mood. Picture needs an image backend and Mood needs character sprites. Closeness only measures; tick "Measure anyway" to chart it.',
-        lists: [{ name: 'rules', entries: [] }],
+        lists: [{
+            name: 'house_rules',
+            description: 'Rules the narrator must follow. One rule per entry. Example: No time skips.',
+            entries: [],
+        }],
         sensors: builtInSensors,
         rules: builtInRules,
     },

@@ -4,6 +4,10 @@ import { hashText, isRecord } from './util.js';
 export const ADD = 'add';
 export const REMOVE = 'remove';
 
+export const FROM_PRESET = 'preset';
+export const FROM_CHAT = 'chat';
+export const FROM_RULE = 'rule';
+
 let counter = 0;
 
 export function normaliseEntry(text) {
@@ -42,7 +46,11 @@ export function startingEntries(preset, name) {
     return normaliseEntries(findList(preset, name)?.entries);
 }
 
-function apply(found, change) {
+export function listDescription(preset, name) {
+    return String(findList(preset, name)?.description ?? '').trim();
+}
+
+function apply(found, change, scope) {
     const value = normaliseEntry(change?.value);
     const key = entryKey(value);
     if (!key) {
@@ -50,7 +58,7 @@ function apply(found, change) {
     }
     if (change.op === ADD) {
         if (!found.has(key)) {
-            found.set(key, value);
+            found.set(key, { value, scope });
         }
     } else if (change.op === REMOVE) {
         found.delete(key);
@@ -67,18 +75,18 @@ function changesOn(message, name) {
     return held.filter(change => change?.list === name && change?.hash === hash);
 }
 
-export function effectiveEntries(chat, preset, name, manual = []) {
+export function effectiveList(chat, preset, name, manual = []) {
     const wanted = String(name ?? '').trim();
     const found = new Map();
     for (const entry of startingEntries(preset, wanted)) {
-        apply(found, { op: ADD, value: entry });
+        apply(found, { op: ADD, value: entry }, FROM_PRESET);
     }
     const mine = (Array.isArray(manual) ? manual : []).filter(change => change?.list === wanted);
     const waiting = new Set(mine);
     let pending = [];
     const flush = () => {
         for (const change of pending) {
-            apply(found, change);
+            apply(found, change, FROM_CHAT);
         }
         pending = [];
     };
@@ -87,7 +95,7 @@ export function effectiveEntries(chat, preset, name, manual = []) {
             flush();
         }
         for (const change of changesOn(message, wanted)) {
-            apply(found, change);
+            apply(found, change, FROM_RULE);
         }
         const anchor = getRecord(message)?.listAnchor;
         if (!anchor) {
@@ -102,10 +110,18 @@ export function effectiveEntries(chat, preset, name, manual = []) {
     flush();
     for (const change of mine) {
         if (waiting.has(change)) {
-            apply(found, change);
+            apply(found, change, FROM_CHAT);
         }
     }
     return [...found.values()];
+}
+
+export function effectiveEntries(chat, preset, name, manual = []) {
+    return effectiveList(chat, preset, name, manual).map(row => row.value);
+}
+
+export function listRows(preset, name) {
+    return effectiveList(currentChat(), preset, name, manualChanges());
 }
 
 export function listResolver(preset) {
@@ -166,6 +182,28 @@ export function forgetManual(list, value) {
         return false;
     }
     writeManualChanges(kept);
+    return true;
+}
+
+export function addStarting(preset, name, value) {
+    const target = findList(preset, name);
+    const entry = normaliseEntry(value);
+    if (!target || !entry) {
+        return false;
+    }
+    target.entries = normaliseEntries([...(target.entries ?? []), entry]);
+    forgetManual(name, entry);
+    return true;
+}
+
+export function removeStarting(preset, name, value) {
+    const target = findList(preset, name);
+    const key = entryKey(value);
+    if (!target || !key) {
+        return false;
+    }
+    target.entries = normaliseEntries(target.entries).filter(entry => entryKey(entry) !== key);
+    forgetManual(name, value);
     return true;
 }
 

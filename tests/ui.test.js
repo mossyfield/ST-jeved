@@ -7,15 +7,19 @@ import { hostStub } from './helpers/host.js';
 const body = installDom();
 globalThis.IntersectionObserver = class { observe() {} };
 
-const context = hostStub({});
+let popupAnswer = 0;
+const context = hostStub({ callGenericPopup: async () => popupAnswer });
 
 const { HOSTS } = await import('../src/classifier.js');
 const { CONFIDENCE } = await import('../src/limits.js');
 const { getPreset, getSettings, initSettings, normaliseSettings } = await import('../src/settings.js');
-const { addCost, addTokens } = await import('../src/engine/status.js');
+const { JEVED_UPDATED, addCost, addTokens, historyStamp } = await import('../src/engine/status.js');
 const { addFired, writeScores } = await import('../src/store.js');
 const { hashText } = await import('../src/util.js');
 const { changeProblems, optionChanges, optionNames, sensorsTab, spreadText } = await import('../src/ui/sensors-tab.js');
+const { listsTab } = await import('../src/ui/lists-tab.js');
+const { chatEntries } = await import('../src/ui/entries.js');
+const { manualChange, ruleChange } = await import('../src/lists.js');
 const { conditionRow, latestLines, rulesTab } = await import('../src/ui/rules-tab.js');
 const { activityTab } = await import('../src/ui/activity-tab.js');
 const { answersFor } = await import('../src/ui/badge.js');
@@ -69,6 +73,11 @@ async function openSensor() {
     await settle();
     return tab;
 }
+
+const typeInto = (input, value) => {
+    input.value = value;
+    input.fire('input');
+};
 
 const nameFields = tab => tab.element.querySelector('.jeved-scale').querySelectorAll('.jeved-input');
 const problemText = tab => tab.element.querySelector('.jeved-problems').childNodes.map(item => item.textContent).join(' ');
@@ -484,56 +493,313 @@ describe('the context a sensor picks', () => {
     });
 });
 
-describe('the Lists section of the Sensors tab', () => {
-    const openTab = () => {
-        const tab = sensorsTab({ refreshAll: () => {}, refreshOthers: () => {}, newRuleFrom: () => {} });
+const entryLines = tab => tab.element.querySelectorAll('.jeved-list-entry').map(item => item.textContent);
+const entryTags = tab => tab.element.querySelector('.jeved-entries').querySelectorAll('.jeved-tag').map(item => item.textContent);
+const pickScope = (tab, value) => tab.element.querySelectorAll('.jeved-segment')
+    .find(item => item.dataset.jevedValue === value).fire('click');
+const removeAt = (tab, at) => tab.element.querySelector('.jeved-entries').querySelectorAll('.jeved-btn--icon').at(at).fire('click');
+
+describe('the Lists tab', () => {
+    const opened = [];
+    const openTab = async (name = '') => {
+        opened.length = 0;
+        const tab = listsTab({
+            refreshAll: () => {}, refreshOthers: () => {}, openList: () => {},
+            openTab: item => opened.push(item),
+        });
         body.replaceChildren(tab.element);
+        if (name) {
+            await tab.select(name);
+        }
         return tab;
     };
-    const chatLines = tab => tab.element.querySelectorAll('.jeved-list-entry').map(item => item.textContent);
-    const typeInto = (input, value) => {
-        input.value = value;
-        input.fire('input');
-    };
+    const rowNames = tab => tab.element.querySelectorAll('.jeved-listing-row').map(line => line.childNodes[0].textContent);
+    const hints = tab => tab.element.querySelectorAll('.jeved-hint').map(item => item.textContent);
 
     beforeEach(() => {
         setup();
         context.chat = [user('u0')];
     });
 
-    it('declares a list and gives it a starting entry', async () => {
-        const tab = openTab();
-        typeInto(tab.element.querySelector('.jeved-lists').querySelector('.jeved-input'), 'House rules');
-        buttonNamed(tab.element, 'Add list').fire('click');
-        assert.deepEqual(getPreset().lists.map(list => list.name), ['house_rules']);
-
-        buttonNamed(tab.element, 'Add starting entry').fire('click');
-        typeInto(tab.element.querySelector('.jeved-list-saved').querySelector('.jeved-input'), 'no cliffhangers');
-        assert.deepEqual(getPreset().lists[0].entries, ['no cliffhangers']);
+    it('says what a list is for while the preset has none', async () => {
+        const tab = await openTab();
+        assert.match(tab.element.querySelector('.jeved-empty').textContent, /^No lists yet\./);
+        assert.ok(buttonNamed(tab.element, 'New list'));
     });
 
-    it('adds an entry to this chat, takes one out and puts a starting entry back', () => {
-        getPreset().lists = [{ name: 'rules', entries: ['one'] }];
-        const tab = openTab();
-        assert.deepEqual(chatLines(tab), ['one']);
+    it('declares a list on Save and refuses a name that is not an id', async () => {
+        const tab = await openTab();
+        buttonNamed(tab.element, 'New list').fire('click');
+        await settle();
 
-        typeInto(tab.element.querySelector('.jeved-list-chat').querySelectorAll('.jeved-input').at(-1), 'two');
-        buttonNamed(tab.element, 'Add').fire('click');
-        assert.deepEqual(chatLines(tab), ['one', 'two']);
+        typeInto(tab.element.querySelector('.jeved-input'), 'House rules');
+        await save(tab);
+        assert.match(problemText(tab), /lowercase letters, numbers and underscores/);
+        assert.deepEqual(getPreset().lists, []);
 
-        tab.element.querySelector('.jeved-list-chat').querySelector('.jeved-btn--icon').fire('click');
-        assert.deepEqual(chatLines(tab), ['two', 'one']);
+        typeInto(tab.element.querySelector('.jeved-input'), 'house_rules');
+        typeInto(tab.element.querySelector('.jeved-area'), 'One rule per entry. Example: No time skips.');
+        await save(tab);
+
+        assert.deepEqual(getPreset().lists, [
+            { name: 'house_rules', description: 'One rule per entry. Example: No time skips.', entries: [] },
+        ]);
+        assert.deepEqual(rowNames(tab), ['house_rules']);
+    });
+
+    it('opens the first list when the tab opens', async () => {
+        getPreset().lists = [{ name: 'one', entries: [] }, { name: 'two', entries: [] }];
+        const tab = await openTab();
+        assert.equal(tab.element.querySelectorAll('.jeved-readout')[0].textContent, 'one');
+    });
+
+    it('shows the description in the row and above the entries', async () => {
+        getPreset().lists = [{ name: 'house_rules', description: 'One rule per entry.', entries: [] }];
+        const tab = await openTab('house_rules');
+        assert.deepEqual(tab.element.querySelectorAll('.jeved-sensor-note').map(item => item.textContent), ['One rule per entry.']);
+        assert.deepEqual(tab.element.querySelectorAll('.jeved-entry-about').map(item => item.textContent), ['One rule per entry.']);
+    });
+
+    it('names what uses the list, and offers the two jumps when nothing does', async () => {
+        getPreset().lists = [{ name: 'house_rules', entries: [] }];
+        const bare = await openTab('house_rules');
+        assert.ok(hints(bare).includes('A sensor asks a question for each entry. Pick this list under Repeat over list.'));
+        assert.ok(hints(bare).includes('A rule writes to it. Use Add to list.'));
+        buttonNamed(bare.element, 'Open Sensors').fire('click');
+        buttonNamed(bare.element, 'Open Rules').fire('click');
+        assert.deepEqual(opened, ['sensors', 'rules']);
+
+        getPreset().sensors[0].repeat = 'house_rules';
+        const used = await openTab('house_rules');
+        assert.equal(buttonNamed(used.element, 'Open Sensors'), null);
+        assert.ok(used.element.querySelectorAll('.jeved-readout').map(item => item.textContent).includes('Mood'));
+    });
+
+    it('tags each entry with where it came from', async () => {
+        getPreset().lists = [{ name: 'house_rules', entries: ['from the preset'] }];
+        const tab = await openTab('house_rules');
+        manualChange('house_rules', 'add', 'by hand');
+        ruleChange(context.chat[0], 'house_rules', 'add', 'by a rule');
+        tab.refresh();
+
+        assert.deepEqual(entryLines(tab), ['from the preset', 'by a rule', 'by hand']);
+        assert.deepEqual(entryTags(tab), ['every chat', 'added by a rule', 'this chat']);
+    });
+
+    it('adds to this chat or to every chat, and the every-chat entry is there in a second chat', async () => {
+        getPreset().lists = [{ name: 'house_rules', entries: [] }];
+        const tab = await openTab('house_rules');
+        const box = tab.element.querySelector('.jeved-entries').querySelector('.jeved-input');
+
+        typeInto(box, 'only here');
+        box.fire('keydown', { key: 'Enter' });
+        assert.deepEqual(entryTags(tab), ['this chat']);
+
+        pickScope(tab, 'every');
+        typeInto(box, 'everywhere');
+        box.fire('keydown', { key: 'Enter' });
+        assert.deepEqual(getPreset().lists[0].entries, ['everywhere']);
+
+        context.chat = [user('other chat')];
+        context.chatMetadata = {};
+        tab.refresh();
+        assert.deepEqual(entryLines(tab), ['everywhere']);
+    });
+
+    it('removes by the scope of the row', async () => {
+        getPreset().lists = [{ name: 'house_rules', entries: ['from the preset'] }];
+        const tab = await openTab('house_rules');
+        manualChange('house_rules', 'add', 'by hand');
+        tab.refresh();
+
+        removeAt(tab, 1);
+        assert.deepEqual(entryLines(tab), ['from the preset']);
+        assert.deepEqual(getPreset().lists[0].entries, ['from the preset']);
+
+        removeAt(tab, 0);
+        assert.deepEqual(entryLines(tab), []);
+        assert.deepEqual(getPreset().lists[0].entries, []);
+    });
+
+    it('strikes an every-chat entry that this chat dropped, and Restore brings it back', async () => {
+        getPreset().lists = [{ name: 'house_rules', entries: ['one'] }];
+        const tab = await openTab('house_rules');
+        manualChange('house_rules', 'remove', 'one');
+        tab.refresh();
+
+        const struck = tab.element.querySelectorAll('.jeved-list-entry--gone').map(item => item.textContent);
+        assert.deepEqual(struck, ['one']);
+        assert.deepEqual(entryTags(tab), ['every chat']);
 
         buttonNamed(tab.element, 'Restore').fire('click');
-        assert.deepEqual(chatLines(tab), ['one', 'two']);
+        assert.deepEqual(tab.element.querySelectorAll('.jeved-list-entry--gone'), []);
+        assert.deepEqual(entryLines(tab), ['one']);
     });
 
-    it('tells a repeating sensor with an empty list where to add one', async () => {
-        getPreset().lists = [{ name: 'rules', entries: [] }];
-        getPreset().sensors[0].repeat = 'rules';
-        const tab = await openSensor();
-        const hint = tab.element.querySelectorAll('.jeved-hint').find(item => item.id === 'jeved_sensor_repeat_hint');
-        assert.match(hint.textContent, /^0 entries, add one in Lists/);
+    it('takes the add box placeholder from the example in the description', async () => {
+        getPreset().lists = [
+            { name: 'house_rules', description: 'One rule per entry. Example: No time skips.', entries: [] },
+            { name: 'cast', entries: [] },
+        ];
+        const shown = await openTab('house_rules');
+        assert.equal(shown.element.querySelector('.jeved-entries').querySelector('.jeved-input').placeholder, 'Example: No time skips.');
+
+        const bare = await openTab('cast');
+        assert.equal(bare.element.querySelector('.jeved-entries').querySelector('.jeved-input').placeholder, 'New entry');
+    });
+
+    it('shows only the every-chat entries and fixes the switch when no chat is open', async () => {
+        getPreset().lists = [{ name: 'house_rules', entries: ['one'] }];
+        context.getCurrentChatId = () => null;
+        try {
+            const tab = await openTab('house_rules');
+            assert.deepEqual(entryLines(tab), ['one']);
+            assert.deepEqual(entryTags(tab), ['every chat']);
+            assert.equal(tab.element.querySelector('.jeved-entry-foot').querySelector('.jeved-row').hidden, true);
+
+            const box = tab.element.querySelector('.jeved-entries').querySelector('.jeved-input');
+            typeInto(box, 'two');
+            box.fire('keydown', { key: 'Enter' });
+            assert.deepEqual(getPreset().lists[0].entries, ['one', 'two']);
+        } finally {
+            context.getCurrentChatId = () => 'chat';
+        }
+    });
+
+    it('says the list is empty', async () => {
+        getPreset().lists = [{ name: 'house_rules', entries: [] }];
+        const tab = await openTab('house_rules');
+        assert.ok(hints(tab).includes('No entries yet.'));
+    });
+
+    it('refuses to delete a list a sensor repeats over', async () => {
+        getPreset().lists = [{ name: 'house_rules', entries: [] }];
+        getPreset().sensors[0].repeat = 'house_rules';
+        const tab = await openTab('house_rules');
+
+        buttonNamed(tab.element, 'Delete list').fire('click');
+        await settle();
+        assert.match(problemText(tab), /used by Mood, so it can't be deleted/);
+        assert.deepEqual(getPreset().lists.map(list => list.name), ['house_rules']);
+    });
+
+    it('shows the name of a saved list as text, so it cannot be renamed', async () => {
+        getPreset().lists = [{ name: 'house_rules', entries: ['one'] }];
+        const tab = await openTab('house_rules');
+        assert.equal(tab.element.querySelectorAll('.jeved-readout')[0].textContent, 'house_rules');
+        const boxes = tab.element.querySelectorAll('.jeved-input');
+        assert.equal(boxes.length, 1, 'only the add box takes text');
+        assert.equal(boxes[0], tab.element.querySelector('.jeved-entries').querySelector('.jeved-input'));
+    });
+
+    it('keeps a name that the preset validator accepts', async () => {
+        const tab = await openTab();
+        buttonNamed(tab.element, 'New list').fire('click');
+        await settle();
+        typeInto(tab.element.querySelector('.jeved-input'), 'two__words_');
+        await save(tab);
+        assert.deepEqual(getPreset().lists.map(list => list.name), ['two__words_']);
+    });
+
+    it('clears the measured counts and tells the rest of the workspace', async () => {
+        getPreset().lists = [{ name: 'house_rules', entries: [] }];
+        const events = [];
+        const kept = context.eventSource;
+        context.eventSource = { emit: name => events.push(name), on: () => {}, removeListener: () => {} };
+        try {
+            const tab = await openTab('house_rules');
+            const before = historyStamp();
+            typeInto(tab.element.querySelector('.jeved-entries').querySelector('.jeved-input'), 'one');
+            buttonNamed(tab.element.querySelector('.jeved-entries'), 'Add').fire('click');
+            assert.notEqual(historyStamp(), before);
+            assert.deepEqual(events, [JEVED_UPDATED]);
+        } finally {
+            context.eventSource = kept;
+        }
+    });
+
+    it('deletes a list nothing uses', async () => {
+        getPreset().lists = [{ name: 'house_rules', entries: [] }];
+        popupAnswer = 1;
+        const tab = await openTab('house_rules');
+        buttonNamed(tab.element, 'Delete list').fire('click');
+        await settle();
+        assert.deepEqual(getPreset().lists, []);
+        popupAnswer = 0;
+    });
+});
+
+describe('the entries of a repeating sensor in the sensor form', () => {
+    const jumped = [];
+    const openWith = async repeat => {
+        getPreset().lists = [{ name: 'rules', entries: ['one'] }];
+        getPreset().sensors[0].repeat = repeat;
+        const tab = sensorsTab({
+            refreshAll: () => {}, refreshOthers: () => {}, newRuleFrom: () => {},
+            openList: name => jumped.push(name),
+        });
+        body.replaceChildren(tab.element);
+        tab.element.querySelectorAll('.jeved-sensor-row')[0].fire('click');
+        await settle();
+        return tab;
+    };
+
+    beforeEach(() => {
+        jumped.length = 0;
+        setup();
+        context.chat = [user('u0')];
+    });
+
+    it('stays hidden until a list is picked', async () => {
+        const tab = await openWith('');
+        const held = () => tab.element.querySelectorAll('.jeved-fold').find(item => item.id === 'jeved_sensor_entries');
+        assert.equal(held().hidden, true);
+
+        const control = tab.element.querySelectorAll('.jeved-picker').find(item => item.id === 'jeved_sensor_repeat');
+        control.value = 'rules';
+        control.fire('change');
+        assert.equal(held().hidden, false);
+        assert.deepEqual(tab.element.querySelectorAll('.jeved-list-entry').map(item => item.textContent), ['one']);
+    });
+
+    it('counts the entries in the fold caption and adds and removes them in this chat', async () => {
+        const tab = await openWith('rules');
+        const caption = () => tab.element.querySelectorAll('.jeved-fold-head').at(-1).textContent;
+        assert.equal(caption(), 'In this chat: 1');
+
+        const box = tab.element.querySelector('.jeved-entries').querySelector('.jeved-input');
+        typeInto(box, 'two');
+        buttonNamed(tab.element.querySelector('.jeved-entries'), 'Add').fire('click');
+        assert.equal(caption(), 'In this chat: 2');
+
+        tab.element.querySelector('.jeved-entries').querySelector('.jeved-btn--icon').fire('click');
+        assert.equal(caption(), 'In this chat: 1');
+    });
+
+    it('jumps to the Lists tab with that list', async () => {
+        const tab = await openWith('rules');
+        buttonNamed(tab.element, 'Open in Lists').fire('click');
+        assert.deepEqual(jumped, ['rules']);
+    });
+
+    it('keeps what you typed through a refresh and clears it when the list changes', async () => {
+        getPreset().lists = [{ name: 'rules', entries: ['one'] }, { name: 'cast', entries: [] }];
+        const tab = await openWith('rules');
+        const boxOf = () => tab.element.querySelector('.jeved-entries').querySelector('.jeved-input');
+        const box = boxOf();
+        typeInto(box, 'half written');
+
+        tab.refresh();
+        assert.equal(boxOf(), box, 'the same input node stays in place');
+        assert.equal(box.value, 'half written');
+
+        const control = tab.element.querySelectorAll('.jeved-picker').find(item => item.id === 'jeved_sensor_repeat');
+        control.value = 'cast';
+        control.fire('change');
+        assert.equal(box.value, '');
+
+        buttonNamed(tab.element.querySelector('.jeved-entries'), 'Add').fire('click');
+        assert.deepEqual(chatEntries(getPreset(), 'cast'), []);
     });
 });
 
@@ -586,6 +852,33 @@ describe('the rule form for each action', () => {
         await settle();
         assert.ok(inline().includes('replies match'));
         assert.ok(hints().some(line => line.startsWith('If the latest reply matches this')));
+    });
+
+    it('names the list a repeating rule checks, and says when it is empty', async () => {
+        const settings = setup([usingCalm()]);
+        settings.presets.Test.lists = [{ name: 'house_rules', entries: [] }];
+        settings.presets.Test.sensors.find(sensor => sensor.id === 'mood').repeat = 'house_rules';
+        const tab = await openRule();
+
+        const hints = () => tab.element.querySelectorAll('.jeved-hint').map(item => item.textContent);
+        assert.ok(hints().includes('Checks each entry of house_rules.'));
+        assert.ok(hints().includes('No entries. Add one to turn this rule on.'));
+        assert.equal(hints().includes('No entries yet.'), false);
+
+        const box = tab.element.querySelector('.jeved-entries').querySelector('.jeved-input');
+        typeInto(box, 'no time skips');
+        box.fire('keydown', { key: 'Enter' });
+        assert.deepEqual(entryLines(tab), ['no time skips']);
+        assert.equal(hints().includes('No entries. Add one to turn this rule on.'), false);
+    });
+
+    it('counts the entries in the rule row', async () => {
+        const settings = setup([usingCalm()]);
+        settings.presets.Test.lists = [{ name: 'house_rules', entries: ['one'] }];
+        settings.presets.Test.sensors.find(sensor => sensor.id === 'mood').repeat = 'house_rules';
+        const tab = rulesTab({ refreshAll: () => {}, refreshOthers: () => {} });
+        body.replaceChildren(tab.element);
+        assert.match(tab.element.querySelector('.jeved-rule-note').textContent, /Mood · 1 entry$/);
     });
 
     it('refuses to save a script rule with no script', async () => {

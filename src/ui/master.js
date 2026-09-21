@@ -223,6 +223,7 @@ export function masterDetail(config) {
         leave: leaveCurrent,
         drop,
         startNew,
+        openId: id => open(indexOf(id)),
         dispose: runClosers,
     };
 }

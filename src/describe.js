@@ -1,6 +1,6 @@
 import { AFTER_REPLY, DEFAULT_ACTION, replacesReply, ruleAction } from './actions.js';
 import { entryKey } from './lists.js';
-import { conditionHolds, missingSensors, scoreOf } from './rules.js';
+import { conditionHolds, missingSensors, ruleList, scoreOf } from './rules.js';
 import { conditionText, entryValue, repeatOf, sensorLabel, typeOf, valueText } from './sensor-types.js';
 import { NO_INPUT, hasInput, labelsFor, latestWords, momentCount, momentOf, momentOfRule, windowWords } from './sensors.js';
 import { MESSAGE_MOMENT, REPLY_MOMENT, firedFor, isNarrator, lastUserIndex } from './store.js';
@@ -203,6 +203,8 @@ export function ruleSummary(rule, sensors = []) {
         return 'This rule has no conditions, so it never fires.';
     }
     const moment = momentOfRule(rule, sensors);
+    const list = ruleList(rule, sensors);
+    const each = list ? `For each entry of ${list}: when ` : 'When ';
     const when = conditions.map(condition => conditionText(condition, sensors)).join(' and ');
     const unless = rule.skipWhen?.sensor
         ? `, except when ${conditionText(rule.skipWhen, sensors)} on ${latestWords(moment)}`
@@ -210,7 +212,7 @@ export function ruleSummary(rule, sensors = []) {
     const cooldown = Number(rule.cooldown) > 0
         ? ` Then it waits ${momentCount(REPLY_MOMENT, Number(rule.cooldown))} before it can fire again.`
         : '';
-    return `When ${when} ${countWords(rule, moment)}${unless}, ${thenWords(rule)}.${cooldown}`;
+    return `${each}${when} ${countWords(rule, moment)}${unless}, ${thenWords(rule)}.${cooldown}`;
 }
 
 export function entryWords(entry) {
@@ -265,6 +267,7 @@ export function badgeFor(chat, index) {
 
 const RULE_PREFIX = /^rule (?:'[^']*'|\d+)(?:, )?:? */;
 const SENSOR_PREFIX = /^sensor (?:'[^']*'|\d+)(?:, )?:? */;
+const LIST_PREFIX = /^list (?:'[^']*'|\d+)(?:, )?:? */;
 
 function withoutPrefix(problem, prefix) {
     const rest = String(problem ?? '').replace(prefix, '');
@@ -277,6 +280,10 @@ export function ruleProblem(problem) {
 
 export function sensorProblem(problem) {
     return withoutPrefix(problem, SENSOR_PREFIX);
+}
+
+export function listProblem(problem) {
+    return withoutPrefix(problem, LIST_PREFIX);
 }
 
 export function excerpt(text, limit = 80) {

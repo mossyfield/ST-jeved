@@ -40,7 +40,8 @@
   expands a repeating sensor into one wire question per entry and maps the answers back.
   `src/engine/scripts.js` gives a script the scope that ties a list command to its rule and its
   message. A caller that needs the entries of the current chat builds one resolver with
-  `listResolver(preset)` and hands it to the pure module it calls.
+  `listResolver(preset)` and hands it to the pure module it calls. The Lists tab is
+  `src/ui/lists-tab.js` and the entries of a chat are shown by `src/ui/entries.js`.
 - A sensor type. Add one entry to `SENSOR_TYPES` in `src/sensor-types.js`. Validation and the
   classifier read from that list. Then make the sensor pane in `src/ui/sensors-tab.js` show the
   fields that the type needs.

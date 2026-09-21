@@ -22,7 +22,7 @@ Needs SillyTavern 1.18.0 or later.
 3. Press Test. Jeved makes one small call to check the key.
 4. Tick "Enabled".
 
-"Open Jeved", the wand menu and `/jeved` open the workspace. It has four tabs: Rules, Sensors,
+"Open Jeved", the wand menu and `/jeved` open the workspace. It has five tabs: Rules, Sensors, Lists,
 Activity, Settings. The built-in preset is Director. Open its rules to read what each one does.
 
 ## Sensors
@@ -92,10 +92,20 @@ A rule has one action.
 
 A list is a named set of text lines. Each chat keeps its own entries.
 
-- The preset declares the list and its starting entries. Manage lists at the top of the Sensors tab.
+- The Lists tab declares a list and edits its entries. The same entries block is in the sensor form
+  and in the rule form, so you can edit a list where you use it.
+- A list carries a description. It says what one entry holds. End it with "Example: ..." and that
+  example becomes the placeholder of the add box.
+- Each entry carries a tag: "every chat" is in the preset, "this chat" you added here, "added by a
+  rule" a rule added.
+- The add box has a switch, "Add to: This chat | Every chat". Every chat writes the entry into the
+  preset at once.
+- Remove follows the tag. A this-chat or rule entry goes out of this chat. An every-chat entry goes
+  out of the preset.
+- An every-chat entry that this chat dropped is struck through. Restore puts it back.
+- With no chat open, only the every-chat entries show and the switch is fixed to Every chat.
 - Two presets that declare the same name share the entries of the chat.
 - A match ignores case and extra spaces. There is no cap.
-- A starting entry that you remove is struck through. Restore puts it back.
 
 A sensor that repeats over a list:
 
@@ -116,11 +126,11 @@ What rolls back:
   swiped away, edited or deleted. It comes back when you swipe back.
 - A list command in a rule's script counts as a change made by that rule. Jeved drops it when the
   reply was swiped away or the chat changed before the command ran.
-- A change made by you (Lists section, or a command that you type) stays until you undo it. It wins
+- A change made by you (Lists tab, or a command that you type) stays until you undo it. It wins
   over the rule changes of its turn.
 
-Director declares one list, `rules`, with no entries. Write each entry as a rule, such as "Do not
-end the reply by asking {{user}} what they do." House rule rerolls a reply that breaks an entry.
+Director declares one list, `house_rules`, with no entries. Write each entry as a rule the narrator
+must follow, such as "No time skips." House rule rerolls a reply that breaks an entry.
 
 ## Activity
 
@@ -203,7 +213,7 @@ Examples:
 
 ## Slash commands
 
-- `/jeved [tab]`: opens the workspace.
+- `/jeved [tab]`: opens the workspace. The tab is rules, sensors, lists, activity or settings.
 - `/jeved-nudge rule=<rule id>`: adds that rule's instruction to your next message one time. A chat
   change cancels it.
 - `/jeved-pause on|off`: stops or starts Jeved in this chat.

@@ -336,6 +336,9 @@ export function validatePreset(data, { parse = null } = {}) {
         } else if ((list.entries ?? []).some(entry => typeof entry !== 'string')) {
             problems.push(`${where}: every entry must be a text`);
         }
+        if (list.description !== undefined && typeof list.description !== 'string') {
+            problems.push(`${where}: the description must be a text`);
+        }
     });
 
     const known = [];
@@ -500,6 +503,7 @@ function knownFields(preset) {
         description: preset.description,
         lists: (Array.isArray(preset.lists) ? preset.lists : []).filter(isRecord).map(list => ({
             name: String(list.name ?? ''),
+            description: String(list.description ?? ''),
             entries: normaliseEntries(list.entries),
         })),
         sensors: preset.sensors.map(sensor => pick(sensor, SENSOR_FIELDS)),

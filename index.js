@@ -2,14 +2,14 @@ import { rescanSentence } from './src/describe.js';
 import { ADD, REMOVE, listNames, listResolver, manualChange, ruleChange } from './src/lists.js';
 import { momentCount } from './src/sensors.js';
 import { MESSAGE_MOMENT } from './src/store.js';
-import { askOnce, cancelRescan, describeError, forceRule, initEngine, invalidateMeasured, isRescanning, measureBlockReason, onCharacterMessage, onChatChanged, planMeasurement, rescan, saveChatSoon, scriptRun, runTarget, setPaused } from './src/engine.js';
+import { askOnce, cancelRescan, describeError, forceRule, initEngine, invalidateMeasured, isRescanning, measureBlockReason, notify, onCharacterMessage, onChatChanged, planMeasurement, rescan, saveChatSoon, scriptRun, runTarget, setPaused } from './src/engine.js';
 import { answerText, askSensor, initMacros } from './src/macros.js';
 import { getPreset, initSettings } from './src/settings.js';
 import { toast } from './src/toast.js';
 import { initBadges, refreshBadges } from './src/ui/badge.js';
 import { ask } from './src/ui/dialogs.js';
 import { addDrawer } from './src/ui/drawer.js';
-import { openWorkspace } from './src/ui/workspace.js';
+import { openWorkspace, tabNames } from './src/ui/workspace.js';
 
 export function jevedCleanUp() {
     const host = SillyTavern.getContext();
@@ -67,6 +67,7 @@ function changeList(args, value, op) {
         manualChange(name, op, text);
     }
     invalidateMeasured();
+    notify();
     return text;
 }
 
@@ -119,7 +120,7 @@ function addListCommands() {
 function addCommands() {
     context.SlashCommandParser.addCommandObject(context.SlashCommand.fromProps({
         name: 'jeved',
-        helpString: 'Open the Jeved workspace. Give a tab name to open that tab.',
+        helpString: 'Open the Jeved workspace. Give a tab name to open that tab: rules, sensors, lists, activity or settings.',
         returns: 'the tab that was opened',
         unnamedArgumentList: [
             context.SlashCommandArgument.fromProps({
@@ -127,7 +128,7 @@ function addCommands() {
                 typeList: [context.ARGUMENT_TYPE.STRING],
                 isRequired: false,
                 defaultValue: 'rules',
-                enumList: ['rules', 'sensors', 'activity', 'settings'].map(name => new context.SlashCommandEnumValue(name)),
+                enumList: tabNames().map(name => new context.SlashCommandEnumValue(name)),
             }),
         ],
         callback: (_args, value) => {

@@ -5,13 +5,14 @@ import { bandText, excerpt, momentTag, previewSentence, ruleLabel, ruleMomentNot
 import { evaluationContext, historiesFor, historyStamp, lastDecision, measuredCount, scriptParser } from '../engine.js';
 import { listNames, listResolver } from '../lists.js';
 import { checkScript, slugId, validatePreset } from '../presets.js';
-import { conditionHolds, explain, replayRule, scoreOf } from '../rules.js';
+import { conditionHolds, explain, replayRule, ruleList, scoreOf } from '../rules.js';
 import { entryValue, findSensor, opOf, rangeOf, repeatOf, seedCondition, sensorLabel, typeOf, valueText } from '../sensor-types.js';
 import { entryKey } from '../lists.js';
 import { latestWords, momentOfRule, momentWord } from '../sensors.js';
 import { getPreset, normalisePreset, saveSettings } from '../settings.js';
 import { currentChat } from '../store.js';
 import { ask } from './dialogs.js';
+import { entriesBlock } from './entries.js';
 import { actions, area, button, clampNumber, column, field, fold, formRow, help, iconButton, node, picker, resultsBox, row, section, segmented, slider, tag, text, toggle, withReason } from './dom.js';
 import { masterDetail } from './master.js';
 
@@ -60,12 +61,20 @@ function rowStatus(status) {
     return status.kind === 'fire' && status.text !== 'Fired' ? 'Firing' : status.text;
 }
 
-function rowNote(rule, sensors, latest) {
+export function entryWords(count) {
+    return `${count} ${count === 1 ? 'entry' : 'entries'}`;
+}
+
+function rowNote(rule, sensors, latest, listEntries) {
     const ids = [...new Set((rule.conditions ?? []).map(condition => condition?.sensor).filter(id => id))];
     const values = ids.map(id => {
         const value = valueText(findSensor(sensors, id), scoreOf(latest, id), '');
         return value ? `${sensorLabel(sensors, id)} ${value}` : sensorLabel(sensors, id);
     });
+    const list = ruleList(rule, sensors);
+    if (list && listEntries) {
+        values.push(entryWords(listEntries(list).length));
+    }
     return [ruleAction(rule)?.shortLabel ?? rule.action, ...values].join(' · ');
 }
 
@@ -269,10 +278,31 @@ function rulePane(preset, draft, api, host, { saved, otherIds }, move) {
         matchWord.textContent = `${momentWord(momentNow())} match`;
         unlessHint.textContent = `If ${latestWords(momentNow())} matches this, the rule won't fire that turn.`;
     };
+    const repeats = node('div', 'jeved-rule-repeats');
+    const entries = entriesBlock(preset, () => ruleList(draft, preset.sensors), () => drawRepeats(), {
+        emptyText: 'No entries. Add one to turn this rule on.',
+    });
+    function drawRepeats() {
+        const list = ruleList(draft, preset.sensors);
+        if (!list) {
+            repeats.replaceChildren();
+            entries.draw();
+            return;
+        }
+        entries.draw();
+        repeats.replaceChildren(section(
+            'Entries',
+            help(`Checks each entry of ${list}.`),
+            entries.element,
+            actions(button('Open in Lists', `Open the list ${list} on the Lists tab`, () => host.openList(list))),
+        ));
+    }
+
     const touch = () => {
         paintSummary();
         paintMoment();
         paintWords();
+        drawRepeats();
         api.markDirty();
         preview?.schedule();
     };
@@ -352,12 +382,17 @@ function rulePane(preset, draft, api, host, { saved, otherIds }, move) {
     const listBlock = node('div', 'jeved-list-fields');
     const drawList = () => {
         const options = listNames(preset).map(name => ({ value: name, label: name }));
-        const control = picker(options, draft.list, value => { draft.list = value; touch(); });
+        const control = picker(options, draft.list, value => { draft.list = value; drawList(); touch(); });
         control.id = 'jeved_rule_list';
         const valueField = field('text', draft.value, '{{entry}}', value => { draft.value = value; touch(); });
         valueField.id = 'jeved_rule_value';
+        const jump = button('Open in Lists', `Open the list ${draft.list} on the Lists tab`, () => host.openList(draft.list));
         listBlock.replaceChildren(
-            formRow('List', control, options.length ? '' : 'This preset declares no list yet. Add one on the Sensors tab.'),
+            formRow(
+                'List',
+                column('', control, options.length && draft.list ? actions(jump) : null),
+                options.length ? '' : 'This preset has no list yet. Add one on the Lists tab.',
+            ),
             formRow('Value', valueField, 'The line to add or remove. Macros and {{entry}} are filled in when the rule fires.'),
         );
     };
@@ -430,10 +465,14 @@ function rulePane(preset, draft, api, host, { saved, otherIds }, move) {
     drawBar();
     api.onRefresh(drawBar);
 
+    drawRepeats();
+    api.onRefresh(() => drawRepeats());
+
     const body = column(
         'jeved-form',
         summary,
         moment,
+        repeats,
         formRow('Name', field('text', draft.label, 'Flat', value => { draft.label = value; api.markDirty(); })),
         section(
             'When',
@@ -494,7 +533,7 @@ export function rulesTab(host) {
                 switcher,
                 text('span', 'jeved-rule-name', ruleLabel(preset.rules, rule.id)),
                 state,
-                text('span', 'jeved-rule-note', rowNote(rule, preset.sensors, evaluation.historyOf(rule).at(-1))),
+                text('span', 'jeved-rule-note', rowNote(rule, preset.sensors, evaluation.historyOf(rule).at(-1), evaluation.listEntries)),
             );
             return line;
         },

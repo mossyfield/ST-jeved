@@ -146,5 +146,5 @@ export { runTarget, scriptParser, scriptRun } from './engine/scripts.js';
 export {
     JEVED_UPDATED, chatPreset, describeError, forceRule, forcedRule, historyStamp, invalidateMeasured,
     isActive, isMeasuring, isPaused, lastDecision, lastError, lastErrorKind, measureBlockReason,
-    measuredCount, sessionCost, sessionTokens, setErrorText, status,
+    measuredCount, notify, sessionCost, sessionTokens, setErrorText, status,
 } from './engine/status.js';

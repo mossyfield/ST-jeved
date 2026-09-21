@@ -92,7 +92,14 @@ describe('the commands Jeved registers', () => {
 
     it('opens the workspace on the tab it was given', () => {
         assert.equal(command('jeved').callback({}, 'Sensors'), 'sensors');
+        assert.equal(command('jeved').callback({}, 'lists'), 'lists');
         assert.equal(command('jeved').callback({}, ''), 'rules');
+    });
+
+    it('offers every tab of the workspace, in order', () => {
+        const names = command('jeved').unnamedArgumentList[0].enumList.map(item => item.value);
+        assert.deepEqual(names, ['rules', 'sensors', 'lists', 'activity', 'settings']);
+        assert.match(command('jeved').helpString, /rules, sensors, lists, activity or settings/);
     });
 });
 
@@ -205,31 +212,31 @@ describe('the list commands', () => {
     const remove = (args, value) => command('jeved-list-remove').callback(args, value);
 
     it('adds and removes by hand and hands the entries back as JSON', () => {
-        assert.equal(entries('rules'), '[]');
-        assert.equal(add({ list: 'rules' }, '  No cliffhangers '), 'No cliffhangers');
-        assert.equal(entries('rules'), '["No cliffhangers"]');
-        remove({ list: 'rules' }, 'no cliffhangers');
-        assert.equal(entries('rules'), '[]');
+        assert.equal(entries('house_rules'), '[]');
+        assert.equal(add({ list: 'house_rules' }, '  No cliffhangers '), 'No cliffhangers');
+        assert.equal(entries('house_rules'), '["No cliffhangers"]');
+        remove({ list: 'house_rules' }, 'no cliffhangers');
+        assert.equal(entries('house_rules'), '[]');
     });
 
     it('refuses a list this preset does not declare and an empty entry', () => {
         assert.throws(() => add({ list: 'gone' }, 'x'), /No list is named gone\./);
         assert.throws(() => entries('gone'), /No list is named gone\./);
-        assert.throws(() => add({ list: 'rules' }, '  '), /Give the entry to change\./);
+        assert.throws(() => add({ list: 'house_rules' }, '  '), /Give the entry to change\./);
     });
 
     it('writes a change that rolls back with the reply when a rule script makes it', async () => {
         const reply = context.chat[1];
         context.executeSlashCommandsWithOptions = async (_text, options) => {
-            add({ list: 'rules', _scope: options.scope }, 'no cliffhangers');
+            add({ list: 'house_rules', _scope: options.scope }, 'no cliffhangers');
         };
-        await runScript({ rule: { id: 'shot', script: '/jeved-list-add list=rules x' }, entries: [] }, reply);
+        await runScript({ rule: { id: 'shot', script: '/jeved-list-add list=house_rules x' }, entries: [] }, reply);
 
-        assert.equal(entries('rules'), '["no cliffhangers"]');
+        assert.equal(entries('house_rules'), '["no cliffhangers"]');
         assert.equal(context.chatMetadata.jeved_lists, undefined);
 
         reply.extra = {};
-        assert.equal(entries('rules'), '[]');
+        assert.equal(entries('house_rules'), '[]');
     });
 
     it('drops a change whose reply was swiped away while the script was still running', async () => {
@@ -237,11 +244,11 @@ describe('the list commands', () => {
         context.executeSlashCommandsWithOptions = async (_text, options) => {
             reply.mes = 'another';
             reply.swipe_id = 1;
-            assert.equal(add({ list: 'rules', _scope: options.scope }, 'no cliffhangers'), '');
+            assert.equal(add({ list: 'house_rules', _scope: options.scope }, 'no cliffhangers'), '');
         };
-        await runScript({ rule: { id: 'shot', script: '/jeved-list-add list=rules x' }, entries: [] }, reply);
+        await runScript({ rule: { id: 'shot', script: '/jeved-list-add list=house_rules x' }, entries: [] }, reply);
 
-        assert.equal(entries('rules'), '[]');
+        assert.equal(entries('house_rules'), '[]');
         assert.equal(context.chatMetadata.jeved_lists, undefined);
         assert.equal(reply.extra, undefined);
     });
@@ -250,12 +257,12 @@ describe('the list commands', () => {
         const reply = context.chat[1];
         context.executeSlashCommandsWithOptions = async (_text, options) => {
             chatId = 'other';
-            assert.equal(add({ list: 'rules', _scope: options.scope }, 'no cliffhangers'), '');
+            assert.equal(add({ list: 'house_rules', _scope: options.scope }, 'no cliffhangers'), '');
         };
-        await runScript({ rule: { id: 'shot', script: '/jeved-list-add list=rules x' }, entries: [] }, reply);
+        await runScript({ rule: { id: 'shot', script: '/jeved-list-add list=house_rules x' }, entries: [] }, reply);
         chatId = 'a';
 
-        assert.equal(entries('rules'), '[]');
+        assert.equal(entries('house_rules'), '[]');
         assert.equal(context.chatMetadata.jeved_lists, undefined);
     });
 
@@ -273,9 +280,9 @@ describe('the list commands', () => {
     });
 
     it('leaves a hand-made change alone when the reply that could hold it is swiped', () => {
-        add({ list: 'rules' }, 'stay in scene');
+        add({ list: 'house_rules' }, 'stay in scene');
         context.chat[1].extra = {};
-        assert.equal(entries('rules'), '["stay in scene"]');
+        assert.equal(entries('house_rules'), '["stay in scene"]');
     });
 });
 

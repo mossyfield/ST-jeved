@@ -43,7 +43,11 @@ export function normalisePreset(preset) {
     const taken = new Set();
     preset.lists = (Array.isArray(preset.lists) ? preset.lists : [])
         .filter(isRecord)
-        .map(list => ({ name: String(list.name ?? ''), entries: normaliseEntries(list.entries) }))
+        .map(list => ({
+            name: String(list.name ?? ''),
+            description: String(list.description ?? ''),
+            entries: normaliseEntries(list.entries),
+        }))
         .filter(list => {
             if (!list.name || isReservedKey(list.name) || taken.has(list.name)) {
                 return false;

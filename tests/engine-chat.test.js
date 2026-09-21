@@ -1598,10 +1598,10 @@ describe('a rule that changes a list', () => {
         id: 'note', label: 'Note', enabled: true, action: 'list_add',
         conditions: [{ sensor: 'change', op: 'below', value: 99 }],
         need: 1, window: 1, skipWhen: null, cooldown: 0, directive: '', script: '',
-        list: 'rules', value: 'no cliffhangers',
+        list: 'house_rules', value: 'no cliffhangers',
         ...overrides,
     });
-    const entries = () => listResolver(getSettings().presets.Director)('rules');
+    const entries = () => listResolver(getSettings().presets.Director)('house_rules');
     const scriptRuleFor = () => ({
         id: 'shot', label: 'Shot', enabled: true, action: 'script',
         conditions: [{ sensor: 'change', op: 'below', value: 99 }],
@@ -1655,8 +1655,8 @@ describe('a rule that changes a list', () => {
             value: 'broke: {{entry}}',
         })];
         setChat('a', [user('u0'), narrator('c0')]);
-        manualChange('rules', 'add', 'no cliffhangers');
-        manualChange('rules', 'add', 'stay in scene');
+        manualChange('house_rules', 'add', 'no cliffhangers');
+        manualChange('house_rules', 'add', 'stay in scene');
         onCharacterMessage(1, 'normal');
         await settle();
 
@@ -1697,7 +1697,7 @@ describe('a rule that changes a list', () => {
     it('rerolls with the entries that matched written into the instruction', async () => {
         getSettings().presets.Director.rules.find(rule => rule.id === 'house').conditions[0].value = 0.6;
         setChat('a', [user('u0'), narrator('c0')]);
-        manualChange('rules', 'add', 'no cliffhangers');
+        manualChange('house_rules', 'add', 'no cliffhangers');
         const right = context.swipe.right;
         context.swipe.right = async () => {
             swipes.push(chatId);
@@ -1720,7 +1720,7 @@ describe('a rule that changes a list', () => {
 
     it('asks the house sensor once for each entry and stores one answer per entry', async () => {
         setChat('a', [user('u0'), narrator('c0')]);
-        manualChange('rules', 'add', 'no cliffhangers');
+        manualChange('house_rules', 'add', 'no cliffhangers');
         seen.length = 0;
         await rescan(planMeasurement({ all: true }).tasks);
 

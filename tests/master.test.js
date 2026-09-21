@@ -126,6 +126,17 @@ describe('a preset switch under an open editor', () => {
         assert.ok(controller.element.querySelector('.jeved-empty'));
     });
 
+    it('opens an item by its id, and leaves the pane alone for an id it does not hold', async () => {
+        preset = { rules: [{ id: 'flat', label: 'Flat in A' }, { id: 'echo', label: 'Echo' }] };
+        controller.refresh();
+
+        await controller.openId('echo');
+        assert.equal(panes.at(-1), 'Echo');
+
+        await controller.openId('gone');
+        assert.equal(panes.at(-1), 'Echo');
+    });
+
     it('still asks before it drops a dirty draft inside one preset', async () => {
         lastApi.markDirty();
         answer = false;

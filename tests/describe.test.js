@@ -362,6 +362,15 @@ describe('ruleSummary', () => {
         );
     });
 
+    it('says a repeating rule checks each entry of its list', () => {
+        const over = [{ id: 'house', label: 'House rule', type: 'noul', repeat: 'house_rules', user: 1, assistant: 1, levels: [] }];
+        const subject = rule({ need: 1, window: 1, conditions: [{ sensor: 'house', op: 'above', value: 0.5 }] });
+        assert.equal(
+            ruleSummary(subject, over),
+            'For each entry of house_rules: when House rule is above 50% on the latest reply, nudge the next turn.',
+        );
+    });
+
     it('says all when every reply in the window must match', () => {
         assert.equal(
             ruleSummary(rule({ need: 4 }), sensors),
